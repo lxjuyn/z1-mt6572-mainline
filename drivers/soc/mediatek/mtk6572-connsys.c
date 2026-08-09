@@ -29,18 +29,21 @@
  *           vcn28-supply = <&mt6323_vcn28_reg>;
  *           status = "disabled";   // enable only after gated board test
  *       };
- *   - After the chip-ID poll passes, add TOPCKGEN bit26 @0x10000084 clock
- *     gating (mainline: via a clk or regmap, not a raw write) and then the
- *     WLAN AHB HIF @0x180f0000 + IRQ 123 in a later WLAN patch.
+ *   - After the chip-ID poll passes, add the WLAN AHB HIF @0x180f0000 +
+ *     IRQ 123 in a later WLAN patch.  (The TOPCKGEN bit26 @0x10000084 CONN
+ *     clock gating TODO below is implemented in this file: see
+ *     mt6572_connsys_clk_gate_enable().)
  */
 
 #include <linux/delay.h>
 #include <linux/io.h>
+#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
+#include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/sizes.h>
 
@@ -56,6 +59,30 @@
 /* CONNSYS firmware shared EMI, inside the 1 MiB carveout @0x80000000. */
 #define MT6572_CONN_SHARED_EMI_BASE	0x80080000
 #define MT6572_CONN_SHARED_EMI_SIZE	0x55c00	/* 343 KiB */
+
+/*
+ * CONN clock gating.  The vendor MT6572 WMT flow (mtk_wcn_consys_hw_reg_ctrl)
+ * opens the CONN clocks before conn_power_on() with these two writes:
+ *
+ *   TOPCKGEN+0x84 |= BIT(26)      (CONSYS_TOP_CLKCG_CLR_REG)
+ *   SPM+0x00        = 0x0b160001  (CONSYS_PWRON_CONFG_EN_REG)
+ *
+ * TOPCKGEN+0x84 is the TOP1 clock-gate "clear" register.  Bit 26 is the SPM
+ * clock gate: mainline clk-mt6572-topckgen.c models it as CLK_TOP_SPM
+ * (GATE_TOP1, sta 0x24 / set 0x54 / clr 0x84, mtk_clk_gate_ops_setclr), so
+ * un-gating is a single write of BIT(26) to the clr offset.  Without it the
+ * CONN SCPSYS power-on and the CONN MCU (chip-ID poll @0x18070008) have no
+ * clock and the poll times out.
+ *
+ * The second write enables SPM "power-on config" control (project key 0x0b16
+ * | BIT(0) == 0x0b160001) -- the vendor precedes every MTCMOS power-on with
+ * it so the CONN power is software-controllable.
+ */
+#define MT6572_CONN_TOP1_CG_CLR		0x84
+#define MT6572_CONN_TOP1_CG_SPM_BIT	BIT(26)
+
+#define MT6572_CONN_SPM_PWRON_CONFIG	0x00
+#define MT6572_CONN_SPM_PWRON_CONFIG_VAL	(0x0b16 << 16 | BIT(0))
 
 struct mt6572_connsys {
 	struct device *dev;
@@ -90,6 +117,48 @@ static int mt6572_connsys_wait_chip_id(struct mt6572_connsys *cs, u32 *chip_id)
 	return -ETIMEDOUT;
 }
 
+/*
+ * Open the CONN clock gates (see the defines above).  Both TOPCKGEN and the
+ * SPM block are "syscon" nodes in the MT6572 dtsi, so this uses the regmap
+ * API instead of raw ioremap.
+ *
+ * Failures are non-fatal: LK/preloader configures TOPCKGEN + SPM before
+ * jumping to the kernel, so the clocks may already be open.  The chip-ID
+ * poll is the real test -- a timeout after a clock-gate warning confirms the
+ * gate was the missing step.
+ */
+static void mt6572_connsys_clk_gate_enable(struct mt6572_connsys *cs)
+{
+	struct regmap *topckgen;
+	struct regmap *spm;
+	int ret;
+
+	topckgen = syscon_regmap_lookup_by_compatible("mediatek,mt6572-topckgen");
+	if (IS_ERR(topckgen)) {
+		dev_warn(cs->dev, "no topckgen syscon (%ld), CONN clock may stay gated\n",
+			 PTR_ERR(topckgen));
+		return;
+	}
+
+	/* Un-gate the SPM clock: clear TOP1 CG bit 26 via the clr register. */
+	ret = regmap_write(topckgen, MT6572_CONN_TOP1_CG_CLR,
+			   MT6572_CONN_TOP1_CG_SPM_BIT);
+	if (ret)
+		dev_warn(cs->dev, "failed to clear TOPCKGEN CG bit 26: %d\n", ret);
+
+	spm = syscon_regmap_lookup_by_compatible("mediatek,mt6572-scpsys");
+	if (IS_ERR(spm)) {
+		dev_warn(cs->dev, "no scpsys syscon (%ld), SPM power-on config not set\n",
+			 PTR_ERR(spm));
+		return;
+	}
+
+	ret = regmap_write(spm, MT6572_CONN_SPM_PWRON_CONFIG,
+			   MT6572_CONN_SPM_PWRON_CONFIG_VAL);
+	if (ret)
+		dev_warn(cs->dev, "failed to set SPM power-on config: %d\n", ret);
+}
+
 static int mt6572_connsys_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -122,6 +191,14 @@ static int mt6572_connsys_probe(struct platform_device *pdev)
 		dev_err_probe(dev, ret, "failed to enable VCN28\n");
 		goto err_vcn18;
 	}
+
+	/*
+	 * (a2) CONN clock gates.  Must be open before the CONN genpd is
+	 * powered on (the SPM clock bit) and before the chip-ID poll; see
+	 * mt6572_connsys_clk_gate_enable().  Non-fatal: LK may have opened
+	 * them already.
+	 */
+	mt6572_connsys_clk_gate_enable(cs);
 
 	/*
 	 * (b) CONN SCPSYS power domain.
