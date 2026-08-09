@@ -1,0 +1,26 @@
+config MTK_CONNECTIVITY
+	bool "MediaTek connectivity (WMT/STP/WiFi) drivers"
+	default n
+	help
+	  MediaTek MT6620/MT6628 combo connectivity subsystem
+	  (WiFi/BT/FM/GPS via WMT). Build out-of-tree modules.
+
+if MTK_CONNECTIVITY
+
+config MTK_COMBO
+	tristate "MTK WMT/STP core (mtk_stp_wmt + hif_sdio)"
+	default m
+
+config MTK_COMBO_BT
+	tristate "MTK STP BT chardev (hci_stp)"
+	default m
+
+config MTK_COMBO_GPS
+	tristate "MTK STP GPS chardev"
+	default m
+
+config MTK_COMBO_WIFI
+	tristate "MTK WMT WiFi chardev + wlan_mt6620 driver"
+	default m
+
+endif

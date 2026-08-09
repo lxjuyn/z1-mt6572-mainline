@@ -1,0 +1,394 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Z1 / V100 hearing-aid device (佳伯听力机 Z1)
+ * Based on mt6572-jty-d101.dts by Max Shevchenko.
+ * Minimal bring-up Z1 dts: eMMC (mmc0) + UART + USB only.
+ * Screen (ST7785M 240x320 DSI) intentionally disabled for first boot.
+ */
+
+/dts-v1/;
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include "mt6572.dtsi"
+#include "mt6323.dtsi"
+
+/ {
+	model = "Z1 hearing-aid";
+	compatible = "jbo,z1", "mediatek,mt6572";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+		/*
+		 * Z1 diagnostic: do not instantiate an early console from DT.
+		 * The normal 8250 console remains selected by the boot header.
+		 */
+		bootargs = "console=tty0 console=ttyS0,115200n8 root=/dev/ram panic=0 ignore_loglevel clk_ignore_unused rdinit=/init";
+		/*
+		 * Z1 LK relocates the MTK ROOTFS payload to 0x84100000.  Its
+		 * ATAG_INITRD2 handoff is not present at runtime, so provide the
+		 * measured range explicitly for this packaged logger ramdisk.
+		 * LK reports payload length 0x104f22 for this image.
+		 * ramdisk_ttygs0_loop.gz body is 0x10ac7d (loop-getty repack:
+		 * respawns getty on ttyGS0 so replug restores the shell),
+		 * so the end must match or the initrd is truncated.
+		 */
+		linux,initrd-start = <0x84100000>;
+		linux,initrd-end = <0x8420ac7d>;
+
+		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
+		framebuffer0: framebuffer@bfd00000 {
+			compatible = "simple-framebuffer";
+			reg = <0xbfd00000 0x28000>;
+			width = <240>;
+			height = <320>;
+			stride = <512>;
+			format = "r5g6b5";
+		};
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 0x40000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/*
+		 * CONN (WiFi/BT) carveout relocated from the original 0x80000000
+		 * (right at RAM base) up to 0xbe000000 so it no longer shadows the
+		 * low-RAM region the Z1 LK/preloader uses during early boot.
+		 * Kept as 1 MiB no-map to match the old size.  The mt6572-connsys
+		 * driver zeroes the "shared EMI" area it gets from connsys_pwr
+		 * reg[1] (see below).
+		 *
+		 * NOTE: this EMI base relocation is a bring-up workaround -- the
+		 * vendor CONN firmware may be built against a fixed shared-EMI
+		 * base of 0x80080000.  If the CONN MCU misbehaves after this
+		 * change, revert both this carveout AND connsys_pwr reg[1]
+		 * together.
+		 */
+		connsys@be000000 {
+			reg = <0xbe000000 0x100000>;
+			no-map;
+		};
+
+		framebuffer_reserved: framebuffer@bf400000 {
+			reg = <0xbf400000 0xc00000>;
+			no-map;
+		};
+
+		default-pool {
+			compatible = "shared-dma-pool";
+			size = <0x6000000>;
+			alloc-ranges = <0x90000000 0x10000000>;
+			reusable;
+			linux,cma-default;
+		};
+	};
+
+	/*
+	 * CONN (WiFi/BT) subsystem consumer. This node binds the in-tree
+	 * driver drivers/soc/mediatek/mtk6572-connsys.c (compatible
+	 * "mediatek,mt6572-connsys"): it powers VCN18/VCN28, powers on the
+	 * MT6572 CONN SCPSYS domain (registered default-off in mt6572.dtsi),
+	 * polls the CONN MCU chip ID at 0x18070000+0x8 and zeroes the shared
+	 * EMI at 0xbe080000. Keep status="disabled" until the board bring-up
+	 * sequence is gated-tested; also keep the 1 MiB reserved-memory
+	 * carveout at 0xbe000000 (above) mapped when enabling.
+	 *
+	 * reg[1] is the shared EMI, relocated to 0xbe080000 to match the
+	 * reserved-memory carveout above.  This is a temporary relocation:
+	 * the vendor CONN firmware may be fixed at 0x80080000 -- if the CONN
+	 * MCU does not come up, revert both reg[1] and the carveout together.
+	 */
+	connsys_pwr: connsys@18070000 {
+		compatible = "mediatek,mt6572-connsys";
+		reg = <0x18070000 0x1000>,
+		      <0xbe080000 0x55c00>;	/* CONN MCU config + shared EMI */
+		power-domains = <&spm MT6572_POWER_DOMAIN_CONN>;
+		vcn18-supply = <&mt6323_vcn18_reg>;
+		vcn28-supply = <&mt6323_vcn28_reg>;
+		vcn33_bt-supply = <&mt6323_vcn33_bt_reg>;
+		vcn33_wifi-supply = <&mt6323_vcn33_wifi_reg>;
+		status = "disabled";
+	};
+
+	/*
+	 * Audio front-end (AFE). Physical base 0x11140000 is the MT6572
+	 * audsys block. This node binds the in-tree ASoC driver
+	 * sound/soc/mediatek/mt6572/mt6572-afe-pcm.c (compatible
+	 * "mediatek,mt6572-audio"): it maps the AFE registers, requests the
+	 * "audio"/"audio_intbus_sel" topckgen clocks and wires the ASYS IRQ.
+	 * Keep disabled until CONFIG_SND_SOC_MT6572 + the MT6323 codec path
+	 * are ready; the IRQ below is an unverified placeholder (the driver
+	 * notes the real ASYS/AFE IRQ number is not confirmed yet). The Z1
+	 * machine card would be a separate "mediatek,mt6572-sound" node
+	 * (mt6572-machine.c) referencing this node via "mediatek,platform".
+	 */
+	audsys: audio@11140000 {
+		compatible = "mediatek,mt6572-audio";
+		reg = <0x11140000 0x600>;
+		clocks = <&topckgen CLK_TOP_AUDIO>,
+			 <&topckgen CLK_TOP_AUDIO_INTBUS_SEL>;
+		clock-names = "audio", "audio_intbus_sel";
+		interrupts = <GIC_SPI 0 IRQ_TYPE_LEVEL_HIGH>; /* TODO: real MT6572 ASYS/AFE IRQ */
+		status = "disabled";
+	};
+
+	/*
+	 * Machine sound card (mt6572-machine.c, compatible
+	 * "mediatek,mt6572-sound").  Binds the AFE platform (&audsys) to the
+	 * MT6323 PMIC codec (&codec, a child of &pmic via mt6323.dtsi).
+	 *
+	 * ENABLE CONDITIONS (all three required):
+	 *   - CONFIG_SND_SOC_MT6572=y/m and the mt6323 codec module built
+	 *   - &audsys above set to status="okay" (AFE clocks/IRQ wired)
+	 *   - pwrap write-deny lifted so the MT6323 codec register path works
+	 * Once those hold, set status="okay" here (and on &audsys) to probe
+	 * the card.  Until then this node is kept disabled so the DTS parses
+	 * cleanly but no card is instantiated.
+	 */
+	sound: sound {
+		compatible = "mediatek,mt6572-sound";
+		mediatek,platform = <&audsys>;
+		mediatek,audio-codec = <&codec>;
+		status = "disabled";
+	};
+
+	/*
+	 * Battery monitoring: static pack characteristics + ADC-backed meter.
+	 *
+	 * battery (simple-battery) holds only the static Z1 pack data.  The
+	 * values below are a generic Li-ion 3.7 V / ~2000 mAh placeholder --
+	 * TBC against the real Z1 battery on first physical measurement.
+	 *
+	 * adc_battery (adc-battery) reads two MT6323 AUXADC channels via
+	 * &mt6323_adc (mediatek,mt6323-auxadc, a child of &pmic):
+	 *   - BATSNS (channel 7)  -> "voltage"     (battery terminal voltage)
+	 *   - BAT_TEMP (channel 2) -> "temperature" (battery temperature)
+	 *
+	 * Keep status="disabled" until the kernel is built with:
+	 *   CONFIG_POWER_SUPPLY=y          (currently not set)
+	 *   CONFIG_GENERIC_ADC_BATTERY=y   (adc-battery driver, not set)
+	 *   CONFIG_MEDIATEK_MT6323_AUXADC=y (IIO auxadc channels, not set)
+	 * Only CONFIG_IIO=y is enabled in the current Z1 .config; without
+	 * MEDIATEK_MT6323_AUXADC there are no IIO channels for adc-battery
+	 * to consume, so leave this disabled until those three are on.
+	 */
+	battery: battery {
+		compatible = "simple-battery";
+		charge-full-design-microamp-hours = <2000000>; /* TBC: Z1 pack */
+		voltage-max-design-microvolt = <4200000>;
+		voltage-min-design-microvolt = <3300000>;
+	};
+
+	adc_battery: adc-battery {
+		compatible = "adc-battery";
+		io-channels = <&mt6323_adc MT6323_AUXADC_BATSNS>,
+			      <&mt6323_adc MT6323_AUXADC_BAT_TEMP>;
+		io-channel-names = "voltage", "temperature";
+		monitored-battery = <&battery>;
+		status = "disabled";
+	};
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&usb {
+	status = "okay";
+	dr_mode = "peripheral";  /* Z1 only acts as USB device (CDC-ACM gadget); never host */
+};
+
+&u2phy0 {
+	status = "okay";
+};
+
+/*
+ * PMIC subsystem bring-up (post eMMC): the MT6323 MFD exposes the power
+ * key, RTC and regulators.  LK already left VEMC/VIO18 powered, so the
+ * regulators probe read-only (the Z1 pwrap write-deny gate still blocks
+ * MT6323 writes).  PMIC_EINT is GPIO7.
+ */
+&pmic {
+	pinctrl-0 = <&pmic_int_pins>;
+	pinctrl-names = "default";
+	interrupts-extended = <&pio 7 IRQ_TYPE_LEVEL_HIGH>;
+	status = "okay";
+};
+
+&mt6323regulator {
+	status = "okay";
+};
+
+/*
+ * PMIC power/home keys.  The MT6323 "home" key maps to KEY_VOLUMEDOWN (114)
+ * which duplicates the matrix keypad MATRIX_KEY(1, 0, KEY_VOLUMEDOWN) (see
+ * &keyboard).  Disable the PMIC home key so volume-down is reported once;
+ * the PMIC power key (KEY_POWER, 116) stays enabled.
+ */
+&mt6323keys {
+	power-off-time-sec = <5>;
+	home {
+		status = "disabled";
+	};
+};
+
+&pwrap {
+	assigned-clocks = <&topckgen CLK_TOP_PMIC_SPI_SEL>;
+	assigned-clock-parents = <&uart_clk>;
+};
+
+&mmc0 {
+	compatible = "mediatek,mt6572-mmc",
+		     "mediatek,mt7623-mmc",
+		     "mediatek,mt2701-mmc";
+	pinctrl-0 = <&mmc0_pins>;
+	pinctrl-names = "z1-validated";
+	bus-width = <1>;
+	max-frequency = <400000>;
+	no-sd;
+	no-sdio;
+	non-removable;
+	status = "okay";
+};
+
+&pio {
+	pmic_int_pins: pmic-int-pins {
+		pins {
+			pinmux = <MT6572_PIN_7_PMIC_EINT__FUNC_PMIC_EINT>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	pwrap_pins: pwrap-pins {
+		pins {
+			pinmux = <MT6572_PIN_8_PMIC_SPI_CSN__FUNC_PMIC_SPI_CSN>,
+				 <MT6572_PIN_9_PMIC_SPI_SCK__FUNC_PMIC_SPI_SCK>,
+				 <MT6572_PIN_10_PMIC_SPI_MOSI__FUNC_PMIC_SPI_MOSI>,
+				 <MT6572_PIN_11_PMIC_SPI_MISO__FUNC_PMIC_SPI_MISO>;
+		};
+	};
+
+	i2c1_pins: i2c1-pins {
+		pins {
+			pinmux = <MT6572_PIN_113_SCL_1_0__FUNC_SCL_1_0>,
+				 <MT6572_PIN_114_SDA_1_0__FUNC_SDA_1_0>;
+		};
+	};
+
+	mmc0_pins: mmc0-pins {
+
+		pins-clk {
+			pinmux = <MT6572_PIN_44_MC0_CK__FUNC_MC0_CK>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+			/* Vendor eMMC setup uses 6 mA for CLK/CMD/DAT. */
+			drive-strength = <6>;
+		};
+
+		pins-cmd-dat {
+			pinmux = <MT6572_PIN_45_MC0_CMD__FUNC_MC0_CMD>,
+				 <MT6572_PIN_46_MC0_DAT0__FUNC_MC0_DAT0>;
+			input-enable;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
+			/* Vendor eMMC setup uses 6 mA for CLK/CMD/DAT. */
+			drive-strength = <6>;
+		};
+
+		/*
+		 * Keep eMMC RST_n deasserted. Pin 54 is PULLSEL-type on
+		 * MT6572 (not R1R0), so use plain bias-pull-up rather than
+		 * Prestigio's R1R0 encoding that would -ENOTSUPP. Stage A
+		 * still only talks CMD/DAT0; RST is held high.
+		 */
+		pins-rst {
+			pinmux = <MT6572_PIN_54_MC0_RSTB__FUNC_MC0_RSTB>;
+			bias-pull-up;
+		};
+	};
+};
+
+&keyboard {
+	status = "okay";
+	/* Z1 keypad matrix fixed at 8 rows x 9 cols (72-slot table) */
+	keypad,num-rows = <8>;
+	keypad,num-columns = <9>;
+	debounce-delay-ms = <32>;
+	linux,keymap = <
+		MATRIX_KEY(0, 0, KEY_VOLUMEUP)
+		MATRIX_KEY(1, 0, KEY_VOLUMEDOWN)
+	>;
+};
+
+&i2c1 {
+	status = "okay";
+	pinctrl-0 = <&i2c1_pins>;
+	pinctrl-names = "default";
+	clock-frequency = <400000>;
+
+	/*
+	 * Unverified reference-board candidate only. GPIO128/129 and GT9XX
+	 * came from cci72_we_jb3, not from proven Z1 hardware evidence.
+	 * The Z1 vendor log instead probes hyn_ts at 0x15 and reports that
+	 * neither capacitive nor generic touch loaded. Keep disabled until an
+	 * I2C1 scan or board evidence identifies the actual controller.
+	 */
+	touchscreen@5d {
+		status = "disabled";
+		compatible = "goodix,gt911";
+		reg = <0x5d>;
+
+		interrupt-parent = <&pio>;
+		interrupts = <1 IRQ_TYPE_EDGE_RISING>;
+		irq-gpios = <&pio 129 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&pio 128 GPIO_ACTIVE_HIGH>;
+
+		AVDD28-supply = <&mt6323_vgp1_reg>;
+		VDDIO-supply = <&mt6323_vio18_reg>;
+
+		/* TBC on-board: Z1 actual touch panel resolution */
+		touchscreen-size-x = <240>;
+		touchscreen-size-y = <320>;
+		touchscreen-inverted-x;
+
+		/* 3 Android capacitive keys: Back/Home/MultiTask (no Search) */
+		goodix,keymap = <KEY_BACK KEY_HOME KEY_APPSELECT 0 0 0 0>;
+	};
+};
+
+/*
+ * Z1 display panel (Sitronix ST7785M 240x320 DSI) -- DT preparation only.
+ *
+ * The ST7785M is the Z1 screen. This child node is a placeholder; it stays
+ * disabled because the whole DSI path is not ready on mainline yet:
+ *   - &dsi (mediatek,mt6572-dsi) is still status="disabled" in mt6572.dtsi
+ *   - requires CONFIG_DRM_MEDIATEK (mtk_drm + mtk_dsi) plus a working
+ *     mt6572-m4u IOMMU and the DIS power domain
+ *   - during current bring-up the LK-composed framebuffer is driven via the
+ *     simple-framebuffer in chosen/framebuffer0 above, not DRM
+ *
+ * To enable on-board later: set &dsi { status = "okay"; }, remove
+ * status="disabled" here, and wire up panel power/backlight (ST7785M usually
+ * needs a reset GPIO + AVDD rail).
+ */
+&dsi {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	panel@0 {
+		compatible = "sitronix,st7785m";
+		reg = <0>;
+		status = "disabled";
+	};
+};
