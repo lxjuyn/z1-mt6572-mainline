@@ -3045,7 +3045,12 @@ static const struct mmc_host_ops mt_msdc_ops = {
 	.enable_sdio_irq = msdc_enable_sdio_irq,
 	.ack_sdio_irq = msdc_ack_sdio_irq,
 	.start_signal_voltage_switch = msdc_ops_switch_volt,
-	.card_busy = msdc_card_busy,
+	/* .card_busy deliberately absent: Z1's msdc_card_busy reads MSDC_PS
+	 * bit16 = DAT0, which stays low (controller-side busy_check artifact,
+	 * not a real card busy) after an R1B CMD6 such as the PART_CONFIG
+	 * switch before a block read.  With no card_busy callback the core
+	 * falls back to CMD13 polling, which succeeds because the card is
+	 * actually idle (rsp 00000900 = TRAN/READY_FOR_DATA). */
 	.execute_tuning = msdc_execute_tuning,
 	.prepare_hs400_tuning = msdc_prepare_hs400_tuning,
 	.execute_hs400_tuning = msdc_execute_hs400_tuning,
