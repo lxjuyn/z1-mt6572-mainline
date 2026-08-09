@@ -1,3 +1,10 @@
+# mt6572 mainline kernel fork (Jabo Z1 + reference boards)
+
+> MediaTek MT6572 mainline port. This file documents the generic platform and
+> per-device component status across the supported boards.
+
+[中文版 README (Chinese)](README_CN.md)
+
 ## Device status
 ### Generic components
 |                                      | JTY D101                                        | Lenovo A369i                | Energy Phone Colors           | Prestigio PAP5500 DUO                           |
