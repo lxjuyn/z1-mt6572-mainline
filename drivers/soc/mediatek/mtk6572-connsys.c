@@ -252,8 +252,8 @@ static int mt6572_connsys_probe(struct platform_device *pdev)
 	}
 
 	memset_io(cs->shared_emi, 0, MT6572_CONN_SHARED_EMI_SIZE);
-	dev_info(dev, "CONNSYS shared EMI cleared (%#x bytes @%#x)\n",
-		 MT6572_CONN_SHARED_EMI_SIZE, MT6572_CONN_SHARED_EMI_BASE);
+	dev_info(dev, "CONNSYS shared EMI cleared (%#x bytes @%px)\n",
+		 MT6572_CONN_SHARED_EMI_SIZE, cs->shared_emi);
 
 	/*
 	 * Keep the regulators and the CONN genpd powered while this driver is
