@@ -3,6 +3,8 @@
 > 把 MT6572 听力机 Z1 从原厂内核 3.4.67 迁移到 mainline Linux 7.0-rc7。
 > 本仓库是编译树：mainline 7.0-rc7 源码 + Z1 板级适配驱动。
 
+[English README](README_EN.md)
+
 ## 硬件
 
 | 项 | 值 |
