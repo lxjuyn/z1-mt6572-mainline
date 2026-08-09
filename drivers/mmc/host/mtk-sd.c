@@ -1812,7 +1812,7 @@ static int msdc_ops_switch_volt(struct mmc_host *mmc, struct mmc_ios *ios)
 	 * no vqmmc supply (Z1 keeps ocr_avail hardcoded and skips the regulator),
 	 * mmc->supply.vqmmc is NULL/ERR and the branch below is skipped, which is
 	 * correct for the existing 1-bit legacy config. */
-	if (!IS_ERR(mmc->supply.vqmmc)) {
+	if (!IS_ERR_OR_NULL(mmc->supply.vqmmc)) {
 		if (ios->signal_voltage != MMC_SIGNAL_VOLTAGE_330 &&
 		    ios->signal_voltage != MMC_SIGNAL_VOLTAGE_180) {
 			dev_err(host->dev, "Unsupported signal voltage!\n");
@@ -2315,8 +2315,12 @@ static void msdc_ops_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	/* Suspend/Resume will do power off/on */
 	switch (ios->power_mode) {
 	case MMC_POWER_UP:
-		if (!IS_ERR(mmc->supply.vmmc)) {
-			msdc_init_hw(host);
+		/* msdc_init_hw must run even without a vmmc supply (Z1 leaves
+		 * the rail powered by LK and has no vmmc-supply DT property, so
+		 * mmc->supply.vmmc is NULL rather than ERR_PTR).  Only the
+		 * regulator call is gated on the supply existing. */
+		msdc_init_hw(host);
+		if (!IS_ERR_OR_NULL(mmc->supply.vmmc)) {
 			ret = mmc_regulator_set_ocr(mmc, mmc->supply.vmmc,
 					ios->vdd);
 			if (ret) {
@@ -2326,7 +2330,7 @@ static void msdc_ops_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		}
 		break;
 	case MMC_POWER_ON:
-		if (!IS_ERR(mmc->supply.vqmmc) && !host->vqmmc_enabled) {
+		if (!IS_ERR_OR_NULL(mmc->supply.vqmmc) && !host->vqmmc_enabled) {
 			ret = regulator_enable(mmc->supply.vqmmc);
 			if (ret)
 				dev_err(host->dev, "Failed to set vqmmc power!\n");
@@ -2335,10 +2339,10 @@ static void msdc_ops_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		}
 		break;
 	case MMC_POWER_OFF:
-		if (!IS_ERR(mmc->supply.vmmc))
+		if (!IS_ERR_OR_NULL(mmc->supply.vmmc))
 			mmc_regulator_set_ocr(mmc, mmc->supply.vmmc, 0);
 
-		if (!IS_ERR(mmc->supply.vqmmc) && host->vqmmc_enabled) {
+		if (!IS_ERR_OR_NULL(mmc->supply.vqmmc) && host->vqmmc_enabled) {
 			regulator_disable(mmc->supply.vqmmc);
 			host->vqmmc_enabled = false;
 		}
