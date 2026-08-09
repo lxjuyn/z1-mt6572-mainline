@@ -1649,25 +1649,10 @@ static void msdc_ops_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	WARN_ON(!host->hsq_en && host->mrq);
 	host->mrq = mrq;
 
-	/*
-	 * CID-only Z1 diagnostic invariant: never let an asynchronous request
-	 * issue data or any command other than CMD0, CMD1, or CMD2.  The direct
-	 * diagnostic uses its own bounded polling path, but retain this gate as a
-	 * hard fail-closed guard against a future mmc-core registration change.
-	 */
-	if (host->z1_direct_cid &&
-	    (mrq->sbc || mrq->data ||
-	     (mrq->cmd->opcode != MMC_GO_IDLE_STATE &&
-	      mrq->cmd->opcode != MMC_SEND_OP_COND &&
-	      mrq->cmd->opcode != MMC_ALL_SEND_CID))) {
-		dev_warn(host->dev, "Z1 CID-only: reject cmd%d%s\n",
-			 mrq->cmd->opcode, mrq->data ? " with data" : "");
-		host->mrq = NULL;
-		mrq->cmd->error = -EOPNOTSUPP;
-		mmc_request_done(mmc, mrq);
-		return;
-	}
-
+	/* z1_direct_cid now drives only the BOOTRST card release during probe;
+	 * the full mmc core enumeration (CMD0..CMD6, data transfers) must be
+	 * allowed to reach the host, otherwise the registered mmcblk cannot
+	 * complete any read and the card is reported "unusable". */
 	if (mrq->data) {
 		msdc_prepare_data(host, mrq->data);
 		if (!msdc_data_prepared(mrq->data)) {
@@ -1822,9 +1807,11 @@ static int msdc_ops_switch_volt(struct mmc_host *mmc, struct mmc_ios *ios)
 	struct msdc_host *host = mmc_priv(mmc);
 	int ret;
 
-	if (host->z1_direct_cid)
-		return 0;
-
+	/* z1_direct_cid no longer short-circuits voltage switching; the full
+	 * enumeration path may call this for HS/1.8V transitions.  When there is
+	 * no vqmmc supply (Z1 keeps ocr_avail hardcoded and skips the regulator),
+	 * mmc->supply.vqmmc is NULL/ERR and the branch below is skipped, which is
+	 * correct for the existing 1-bit legacy config. */
 	if (!IS_ERR(mmc->supply.vqmmc)) {
 		if (ios->signal_voltage != MMC_SIGNAL_VOLTAGE_330 &&
 		    ios->signal_voltage != MMC_SIGNAL_VOLTAGE_180) {
@@ -3856,9 +3843,6 @@ static int msdc_drv_probe(struct platform_device *pdev)
 			       IRQF_TRIGGER_NONE, pdev->name, host);
 	if (ret)
 		goto release;
-
-	if (host->z1_direct_cid)
-		return msdc_z1_read_cid(mmc);
 
 	pm_runtime_set_active(host->dev);
 	pm_runtime_set_autosuspend_delay(host->dev, MTK_MMC_AUTOSUSPEND_DELAY);
