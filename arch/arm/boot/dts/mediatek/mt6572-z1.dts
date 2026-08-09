@@ -267,7 +267,7 @@
 	pinctrl-0 = <&mmc0_pins>;
 	pinctrl-names = "z1-validated";
 	bus-width = <1>;
-	max-frequency = <400000>;
+	max-frequency = <50000000>;
 	no-sd;
 	no-sdio;
 	non-removable;
