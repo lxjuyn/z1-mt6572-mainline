@@ -254,7 +254,8 @@
 		     "mediatek,mt7623-mmc",
 		     "mediatek,mt2701-mmc";
 	pinctrl-0 = <&mmc0_pins>;
-	pinctrl-names = "z1-validated";
+	pinctrl-1 = <&mmc0_pins>;
+	pinctrl-names = "default", "z1-validated";
 	bus-width = <1>;
 	max-frequency = <400000>;
 	no-sd;

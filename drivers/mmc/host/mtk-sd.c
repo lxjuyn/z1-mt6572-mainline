@@ -2185,6 +2185,16 @@ static void msdc_init_hw(struct msdc_host *host)
 	writel(pb2_val, host->base + MSDC_PATCH_BIT2);
 	sdr_set_bits(host->base + EMMC50_CFG0, EMMC50_CFG_CFCSTS_SEL);
 
+	/*
+	 * Z1: the mainline default PB1 (BUSY_CHECK_SEL + DDR_CMD_FIX_SEL)
+	 * makes DAT0 read back stuck-low, so every R1B CMD6 (e.g. the
+	 * PART_CONFIG switch before a block read) is misread as busy and the
+	 * core aborts with -110.  The vendor baseline 0xffff0009 clears both;
+	 * restore it on each re-init so set_ios(MMC_POWER_UP) cannot undo it.
+	 */
+	if (host->z1_direct_cid)
+		writel(0xffff0009, host->base + MSDC_PATCH_BIT1);
+
 	if (host->dev_comp->data_tune) {
 		if (host->top_base) {
 			u32 top_ctl_val = readl(host->top_base + EMMC_TOP_CONTROL);
