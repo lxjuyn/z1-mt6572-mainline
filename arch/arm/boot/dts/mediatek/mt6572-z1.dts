@@ -141,7 +141,7 @@
 			 <&topckgen CLK_TOP_AUDIO_INTBUS_SEL>;
 		clock-names = "audio", "audio_intbus_sel";
 		interrupts = <GIC_SPI 0 IRQ_TYPE_LEVEL_HIGH>; /* TODO: real MT6572 ASYS/AFE IRQ */
-		status = "disabled";
+		status = "okay";
 	};
 
 	/*
@@ -161,7 +161,7 @@
 		compatible = "mediatek,mt6572-sound";
 		mediatek,platform = <&audsys>;
 		mediatek,audio-codec = <&codec>;
-		status = "disabled";
+		status = "okay";
 	};
 
 	/*
@@ -189,6 +189,7 @@
 		charge-full-design-microamp-hours = <2000000>; /* TBC: Z1 pack */
 		voltage-max-design-microvolt = <4200000>;
 		voltage-min-design-microvolt = <3300000>;
+		status = "okay";
 	};
 
 	adc_battery: adc-battery {
@@ -197,7 +198,7 @@
 			      <&mt6323_adc MT6323_AUXADC_BAT_TEMP>;
 		io-channel-names = "voltage", "temperature";
 		monitored-battery = <&battery>;
-		status = "disabled";
+		status = "okay";
 	};
 };
 

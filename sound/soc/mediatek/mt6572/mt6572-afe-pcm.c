@@ -499,17 +499,24 @@ static int mt6572_afe_pcm_dev_probe(struct platform_device *pdev)
 	 * vendor kernel routes it through the ASYS IRQ of the topckgen /
 	 * sysirq domain.  platform_get_irq() reads the DT "interrupts"
 	 * property once the audsys node exists.
+	 *
+	 * Framework-validation placeholder: the real MT6572 ASYS/AFE IRQ is
+	 * not confirmed, so a missing/unrequestable IRQ must NOT abort the
+	 * AFE probe.  Log and continue so the ASoC framework + MT6323 codec
+	 * path can still be exercised on Z1 without sound output.
 	 */
 	irq_id = platform_get_irq(pdev, 0);
-	if (irq_id < 0)
-		return irq_id;
-
-	ret = devm_request_irq(dev, irq_id, mt6572_afe_isr,
-			       IRQF_TRIGGER_NONE, "mt6572-afe-isr",
-			       (void *)afe);
-	if (ret) {
-		dev_err(dev, "could not request_irq for afe-isr\n");
-		return ret;
+	if (irq_id < 0) {
+		dev_warn(dev, "no ASYS/AFE IRQ (%d), continuing framework-only\n",
+			 irq_id);
+	} else {
+		ret = devm_request_irq(dev, irq_id, mt6572_afe_isr,
+				       IRQF_TRIGGER_NONE, "mt6572-afe-isr",
+				       (void *)afe);
+		if (ret)
+			dev_warn(dev,
+				 "request_irq for afe-isr failed (%d), continuing framework-only\n",
+				 ret);
 	}
 
 	afe->mtk_afe_hardware = &mt6572_afe_hardware;

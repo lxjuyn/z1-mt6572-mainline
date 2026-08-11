@@ -6,9 +6,10 @@
  * panel based on the Sitronix ST7785M TFT controller.
  *
  * The ST7785M belongs to the same controller family as the ST7789V (command
- * set compatible), but is wired through MIPI DSI instead of SPI. The exact
- * ST7785M init table is not available locally, so the init sequence below is
- * taken from the ST7789V driver and must be validated on the target.
+ * set compatible), but is wired through MIPI DSI instead of SPI. The init
+ * sequence below is the exact table extracted from the Z1 factory LK binary
+ * (see mainline_recon/ST7785M_INIT_LK_20260810.h), with the LK 16-bit
+ * 0x00 prefix stripped so that only the effective low bytes are sent.
  *
  * Reference timing measured from the Z1 LK boot log
  * (mainline_recon/z1_boot_mainline_20260731_230233.log):
@@ -46,6 +47,8 @@
 #define ST7789V_PWCTRL1_CMD	0xd0	/* Power control 1 */
 #define ST7789V_PVGAMCTRL_CMD	0xe0	/* Positive voltage gamma control */
 #define ST7789V_NVGAMCTRL_CMD	0xe1	/* Negative voltage gamma control */
+#define ST7785M_RAMCTRL_CMD	0xb0	/* RAM control */
+#define ST7785M_D6_CMD		0xd6	/* Register 0xd6 */
 
 struct st7785m_panel_desc {
 	const struct drm_display_mode *mode;
@@ -82,52 +85,55 @@ static int st7785m_dcs_write(struct st7785m *ctx, u8 cmd, const void *data,
 			  sizeof((const u8[]){ data }))
 
 /*
- * ST7789V-family init sequence for a standard 240x320 QVGA mode.
- *
- * TODO: replace with the exact ST7785M init table once it is available and
- * validate every register value against the ST7785M datasheet / the values
- * used by the Z1 factory kernel.
+ * ST7785M init sequence (22 commands) extracted from the Z1 factory LK
+ * binary (mainline_recon/ST7785M_INIT_LK_20260810.h, init table at
+ * lk.bin file 0x396d0). LK stores every register as (0x00, value) on the
+ * DSI link; the effective low bytes are sent here. 0xFE entries are LK
+ * delay markers (ms), 0xFF marks the end of the table.
  */
 static int st7785m_init_sequence(struct st7785m *ctx)
 {
 	struct mipi_dsi_device *dsi = ctx->dsi;
 	int ret;
 
-	/* Exit sleep mode and wait for the panel to stabilize. */
+	/* Sleep Out, then wait for the panel to stabilize (LK delay 120ms). */
 	ret = mipi_dsi_dcs_exit_sleep_mode(dsi);
 	if (ret)
 		return ret;
 	msleep(120 + ctx->desc->sleep_delay);
 
-	/* MADCTL: RGB order, portrait, scan from top-left.
-	 * TODO: confirm the scan direction on the target.
-	 */
-	ret = st7785m_dcs_write(ctx, MIPI_DCS_SET_ADDRESS_MODE, 0x00, 1);
+	/* MADCTL: RGB order, portrait, scan from top-left (LK effective 0x00). */
+	ret = ST7785M_DCS_WRITE(ctx, MIPI_DCS_SET_ADDRESS_MODE, 0x00);
 	if (ret)
 		return ret;
 
-	/* COLMOD: RGB565, 16bpp ("two bytes per pixel"), matches the LK data. */
-	ret = mipi_dsi_dcs_set_pixel_format(dsi, MIPI_DCS_PIXEL_FMT_16BIT);
+	/* COLMOD: pixel format 0x06 as programmed by the Z1 LK. */
+	ret = ST7785M_DCS_WRITE(ctx, MIPI_DCS_SET_PIXEL_FORMAT, 0x06);
 	if (ret)
 		return ret;
 
-	/* Porch control. */
+	/* RAMCTRL. */
+	ret = ST7785M_DCS_WRITE(ctx, ST7785M_RAMCTRL_CMD, 0x10);
+	if (ret)
+		return ret;
+
+	/* PORCTRL: porch control (LK effective 0x0c 0x0c 0x00 0x33 0x33). */
 	ret = ST7785M_DCS_WRITE(ctx, ST7789V_PORCTRL_CMD,
 				0x0c, 0x0c, 0x00, 0x33, 0x33);
 	if (ret)
 		return ret;
 
-	/* Gate control: VGLS(5) | VGHS(3). */
+	/* GCTRL: gate control VGLS(5) | VGHS(3). */
 	ret = ST7785M_DCS_WRITE(ctx, ST7789V_GCTRL_CMD, 0x35);
 	if (ret)
 		return ret;
 
-	/* VCOM setting. */
-	ret = ST7785M_DCS_WRITE(ctx, ST7789V_VCOMS_CMD, 0x2b);
+	/* VCOMS: VCOM setting. */
+	ret = ST7785M_DCS_WRITE(ctx, ST7789V_VCOMS_CMD, 0x29);
 	if (ret)
 		return ret;
 
-	/* LCM control: XMH | XMX | XBGR. */
+	/* LCMCTRL. */
 	ret = ST7785M_DCS_WRITE(ctx, ST7789V_LCMCTRL_CMD, 0x2c);
 	if (ret)
 		return ret;
@@ -138,7 +144,7 @@ static int st7785m_init_sequence(struct st7785m *ctx)
 		return ret;
 
 	/* VRH set. */
-	ret = ST7785M_DCS_WRITE(ctx, ST7789V_VRHS_CMD, 0x0f);
+	ret = ST7785M_DCS_WRITE(ctx, ST7789V_VRHS_CMD, 0x15);
 	if (ret)
 		return ret;
 
@@ -147,29 +153,49 @@ static int st7785m_init_sequence(struct st7785m *ctx)
 	if (ret)
 		return ret;
 
-	/* Frame rate control. */
+	/* FRCTRL2: frame rate. */
 	ret = ST7785M_DCS_WRITE(ctx, ST7789V_FRCTRL2_CMD, 0x0f);
 	if (ret)
 		return ret;
 
-	/* Power control 1. */
+	/* PWCTRL1: power control. */
 	ret = ST7785M_DCS_WRITE(ctx, ST7789V_PWCTRL1_CMD, 0xa4, 0xa1);
 	if (ret)
 		return ret;
 
-	/* Positive voltage gamma (ST7789V default, TODO: on-board calibration). */
-	ret = ST7785M_DCS_WRITE(ctx, ST7789V_PVGAMCTRL_CMD,
-				0xd0, 0xca, 0x0e, 0x08, 0x09, 0x07, 0x2d,
-				0x3b, 0x3d, 0x34, 0x0a, 0x0a, 0x1b, 0x28);
+	/* Register 0xd6. */
+	ret = ST7785M_DCS_WRITE(ctx, ST7785M_D6_CMD, 0xa1);
 	if (ret)
 		return ret;
 
-	/* Negative voltage gamma (ST7789V default, TODO: on-board calibration). */
-	ret = ST7785M_DCS_WRITE(ctx, ST7789V_NVGAMCTRL_CMD,
-				0xd0, 0xca, 0x0f, 0x08, 0x08, 0x07, 0x2e,
-				0x5c, 0x40, 0x34, 0x09, 0x0b, 0x1b, 0x28);
+	/* PVGAMCTRL: positive gamma (LK effective values). */
+	ret = ST7785M_DCS_WRITE(ctx, ST7789V_PVGAMCTRL_CMD,
+				0xd0, 0x09, 0x0f, 0x09, 0x09, 0x16, 0x35,
+				0x44, 0x4d, 0x28, 0x13, 0x13, 0x2d, 0x30);
 	if (ret)
 		return ret;
+
+	/* NVGAMCTRL: negative gamma (LK effective values). */
+	ret = ST7785M_DCS_WRITE(ctx, ST7789V_NVGAMCTRL_CMD,
+				0xd0, 0x06, 0x0c, 0x0b, 0x09, 0x05, 0x35,
+				0x33, 0x4d, 0x3a, 0x18, 0x17, 0x2d, 0x2f);
+	if (ret)
+		return ret;
+
+	/* Display Inversion ON. */
+	ret = st7785m_dcs_write(ctx, MIPI_DCS_ENTER_INVERT_MODE, NULL, 0);
+	if (ret)
+		return ret;
+
+	/* Display ON, then a dummy Memory Write as LK does. */
+	ret = mipi_dsi_dcs_set_display_on(dsi);
+	if (ret)
+		return ret;
+
+	ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_WRITE_MEMORY_START, NULL, 0);
+	if (ret)
+		return ret;
+	msleep(20);
 
 	return 0;
 }
@@ -214,6 +240,12 @@ static int st7785m_unprepare(struct drm_panel *panel)
 {
 	struct st7785m *ctx = panel_to_st7785m(panel);
 	int ret;
+
+	/* LK suspend table: Display Off, delay 120ms, Sleep In, delay 120ms. */
+	ret = mipi_dsi_dcs_set_display_off(ctx->dsi);
+	if (ret)
+		return ret;
+	msleep(120);
 
 	ret = mipi_dsi_dcs_enter_sleep_mode(ctx->dsi);
 	if (ret)
