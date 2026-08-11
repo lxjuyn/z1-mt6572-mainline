@@ -2181,6 +2181,17 @@ static void msdc_init_hw(struct msdc_host *host)
 		pb2_val |= MSDC_PB2_SUPPORT_64G;
 
 	/* Patch Bit 1/2 setup is done: pull the trigger! */
+	if (host->z1_direct_cid) {
+		/* Z1: the mainline default BUSY_CHECK_SEL + DDR_CMD_FIX_SEL make
+		 * the controller's DAT0-busy signal read as perpetually busy,
+		 * which stalls R1B CMD6 polling (read) AND every write data
+		 * transfer (CMD24/25 wait for XFER_COMPL until busy releases).
+		 * Surgically clear only these two bits, keeping CMDTA/WRDAT_CRC
+		 * and the rest of the mainline default intact.  (Do NOT write the
+		 * full 0xffff0009 baseline here -- that also clears CMDTA and
+		 * breaks CMD1 during enumeration, as seen before.) */
+		pb1_val &= ~(MSDC_PB1_BUSY_CHECK_SEL | MSDC_PB1_DDR_CMD_FIX_SEL);
+	}
 	writel(pb1_val, host->base + MSDC_PATCH_BIT1);
 	writel(pb2_val, host->base + MSDC_PATCH_BIT2);
 	sdr_set_bits(host->base + EMMC50_CFG0, EMMC50_CFG_CFCSTS_SEL);
