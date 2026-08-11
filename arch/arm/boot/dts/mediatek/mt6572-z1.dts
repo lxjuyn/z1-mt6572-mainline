@@ -123,6 +123,76 @@
 	};
 
 	/*
+	 * CONNSYS out-of-tree stack DT nodes (mt6572-connsys-modules, forward
+	 * port of the vendor conn_soc family).  These bind the external .ko
+	 * platform drivers:
+	 *   btif@1100e000      -> mtk_btif_drv.ko  ("mediatek,btif")
+	 *   connectivity@18070000 -> mtk_stp_wmt_soc.ko / mtk_wmt_wifi_soc.ko
+	 *                        ("mediatek,mt6572-consys")
+	 *   wifi@180f0000      -> wlan_gen2.ko     ("mediatek,wifi")
+	 *
+	 * IRQ numbers are the vendor MT6572 GIC SPI IDs (mt_irq.h,
+	 * GIC_PRIVATE_SIGNALS + N): BTIF=52, APDMA-BTIF-TX=41, APDMA-BTIF-RX=42,
+	 * CONN2AP/BTIF-wakeup=122, WF_HIF=123, CONN_WDT=124.
+	 *
+	 * The old in-tree connsys_pwr node above stays disabled: it binds
+	 * drivers/soc/mediatek/mtk6572-connsys.c and must not double-power the
+	 * CONN domain / regulators with this stack.
+	 */
+	btif: btif@1100e000 {
+		compatible = "mediatek,btif";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		reg = <0x1100e000 0x1000>,
+		      <0x11000380 0x80>,
+		      <0x11000400 0x80>;
+		interrupts = <GIC_SPI 52 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&topckgen CLK_TOP_BTIF>,
+			 <&topckgen CLK_TOP_APDMA>;
+		clock-names = "btifc", "apdmac";
+
+		btif_tx: btif_tx@11000380 {
+			compatible = "mediatek,btif_tx";
+			reg = <0x11000380 0x80>;
+			interrupts = <GIC_SPI 41 IRQ_TYPE_LEVEL_LOW>;
+		};
+
+		btif_rx: btif_rx@11000400 {
+			compatible = "mediatek,btif_rx";
+			reg = <0x11000400 0x80>;
+			interrupts = <GIC_SPI 42 IRQ_TYPE_LEVEL_LOW>;
+		};
+	};
+
+	connectivity: connectivity@18070000 {
+		compatible = "mediatek,mt6572-consys";
+		/*
+		 * reg[0] = CONN MCU config (chip ID poll @ +0x8, expects 0x6572).
+		 * reg[1] = TOPCKGEN block base: the driver does of_iomap(node,1)
+		 * and pokes AP2CONN_OSC_EN at base+0x1800 (phys 0x10001800),
+		 * so the range must cover 0x10001800.
+		 */
+		reg = <0x18070000 0x1000>,
+		      <0x10000000 0x2000>;
+		interrupts = <GIC_SPI 122 IRQ_TYPE_LEVEL_LOW>,	/* CONN2AP / BTIF wakeup */
+			     <GIC_SPI 124 IRQ_TYPE_LEVEL_LOW>;	/* CONN WDT */
+		mediatek,pwrap-regmap = <&pwrap>;
+		power-domains = <&spm MT6572_POWER_DOMAIN_CONN>;
+		resets = <&watchdog MT6572_TOPRGU_CONNSYS_SW_RST>;
+		reset-names = "connsys";
+		vcn18-supply = <&mt6323_vcn18_reg>;
+		vcn28-supply = <&mt6323_vcn28_reg>;
+		vcn33_bt-supply = <&mt6323_vcn33_bt_reg>;
+		vcn33_wifi-supply = <&mt6323_vcn33_wifi_reg>;
+	};
+
+	wifi: wifi@180f0000 {
+		compatible = "mediatek,wifi";
+		reg = <0x180f0000 0x1000>;
+		interrupts = <GIC_SPI 123 IRQ_TYPE_LEVEL_LOW>;
+	};
+
+	/*
 	 * Audio front-end (AFE). Physical base 0x11140000 is the MT6572
 	 * audsys block. This node binds the in-tree ASoC driver
 	 * sound/soc/mediatek/mt6572/mt6572-afe-pcm.c (compatible
