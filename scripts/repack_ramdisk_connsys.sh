@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SRC=${Z1_RAMDISK_SRC:-/home/lxj/claude/6572/out/forensic/linux/ramdisk.gz}
-MODS_SRC=${Z1_MODS_SRC:-/home/lxj/claude/6572/bridge_backups/products/products_connsys_modules_rebuilt_20260814_004806}
+MODS_SRC=${Z1_MODS_SRC:-/home/lxj/claude/6572/bridge_backups/products/products_connsys_modules_z1vermagic_20260814_015009}
 SCRIPT=/home/lxj/claude/6572/scripts/z1_modprobe_connsys.sh
 OUT=${Z1_RAMDISK_OUT:-/home/lxj/claude/6572/out/ramdisk_mainline_connsys.gz}
 TMP=$(mktemp -d /tmp/rdkc_XXXXXX)
