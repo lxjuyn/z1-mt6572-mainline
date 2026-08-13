@@ -69,6 +69,14 @@ if [ -f "$FW_SRC/WMT_SOC.cfg" ]; then
     cp "$FW_SRC/WMT_SOC.cfg" "$TMP/rd/system/etc/firmware/WMT_SOC.cfg"
     echo "  固件 WMT_SOC.cfg"
 fi
+# Wi-Fi NVRAM (wlan_gen2 glLoadNvram 读 /etc/firmware/nvram/WIFI, 512B; 缺 → 随机 MAC + 单播 RX 丢帧)
+# 提取自 stock NVRAM 分区 offset 0x20000, md5 a6182f634a2554bc881e87fdf111ecd1, 真实 MAC 20:72:0d:39:0d:1f
+NVRAM_SRC=${Z1_NVRAM_SRC:-/home/lxj/claude/6572/mainline_recon/wifi-nvram-WIFI.bin}
+if [ -f "$NVRAM_SRC" ]; then
+    mkdir -p "$TMP/rd/etc/firmware/nvram"
+    cp "$NVRAM_SRC" "$TMP/rd/etc/firmware/nvram/WIFI"
+    echo "  固件 NVRAM WIFI (512B, MAC 20:72:0d:39:0d:1f)"
+fi
 
 # 4. 重打包 cpio -H newc + gzip
 (cd "$TMP/rd" && find . | cpio -o -H newc 2>/dev/null | gzip -9) > "$TMP/body_new.gz"
