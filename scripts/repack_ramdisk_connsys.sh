@@ -6,6 +6,7 @@ set -euo pipefail
 
 SRC=${Z1_RAMDISK_SRC:-/home/lxj/claude/6572/out/forensic/linux/ramdisk.gz}
 MODS_SRC=${Z1_MODS_SRC:-/home/lxj/claude/6572/bridge_backups/products/products_connsys_modules_rebuilt_20260814_004806}
+FW_SRC=${Z1_FW_SRC:-/home/lxj/claude/6572/out/firmware_backup/firmware}
 SCRIPT=/home/lxj/claude/6572/scripts/z1_modprobe_connsys.sh
 OUT=${Z1_RAMDISK_OUT:-/home/lxj/claude/6572/out/ramdisk_mainline_connsys.gz}
 TMP=$(mktemp -d /tmp/rdkc_XXXXXX)
@@ -43,6 +44,31 @@ for extra in \
 done
 cp "$SCRIPT" "$TMP/rd/root/connsys/z1_modprobe_connsys.sh"
 chmod +x "$TMP/rd/root/connsys/z1_modprobe_connsys.sh"
+
+# 3.5 塞 CONNSYS 固件 (WMT_init 读 /system/etc/firmware/WMT_SOC.cfg, wlan request_firmware WIFI_RAM_CODE_*)
+#    WMT_SOC.cfg 缺失 → wmt_conf_read_file 失败 → wmt_lib_init(-1) → mtk_stp_wmt_soc insmod 失败 (上板实测)
+mkdir -p "$TMP/rd/lib/firmware" "$TMP/rd/system/etc/firmware"
+# WIFI RAM code: wlan_gen2 请求顺序 WIFI_RAM_CODE_MT6582 → WIFI_RAM_CODE_SOC → WIFI_RAM_CODE
+# 只放前两份 (MT6582 + SOC), 第三份 WIFI_RAM_CODE 是 fallback 保险, 去掉省 ~160KB 让 boot.img ≤6MB
+for name in WIFI_RAM_CODE_MT6582 WIFI_RAM_CODE_SOC; do
+    if [ -f "$FW_SRC/WIFI_RAM_CODE_SOC" ]; then
+        cp "$FW_SRC/WIFI_RAM_CODE_SOC" "$TMP/rd/lib/firmware/$name"
+        echo "  固件 $name ← WIFI_RAM_CODE_SOC"
+    fi
+done
+# WMT patch (launcher 喂内核, 原名 + ROMv1_patch_N_hdr.bin fallback 名)
+if [ -f "$FW_SRC/mt6572_82_patch_e1_0_hdr.bin" ] && [ -f "$FW_SRC/mt6572_82_patch_e1_1_hdr.bin" ]; then
+    cp "$FW_SRC/mt6572_82_patch_e1_0_hdr.bin" "$TMP/rd/system/etc/firmware/mt6572_82_patch_e1_0_hdr.bin"
+    cp "$FW_SRC/mt6572_82_patch_e1_1_hdr.bin" "$TMP/rd/system/etc/firmware/mt6572_82_patch_e1_1_hdr.bin"
+    cp "$FW_SRC/mt6572_82_patch_e1_0_hdr.bin" "$TMP/rd/system/etc/firmware/ROMv1_patch_0_hdr.bin"
+    cp "$FW_SRC/mt6572_82_patch_e1_1_hdr.bin" "$TMP/rd/system/etc/firmware/ROMv1_patch_1_hdr.bin"
+    echo "  固件 mt6572_82_patch_e1_{0,1} + ROMv1_patch_{0,1}"
+fi
+# WMT_SOC.cfg (内核 filp_open 绝对路径读)
+if [ -f "$FW_SRC/WMT_SOC.cfg" ]; then
+    cp "$FW_SRC/WMT_SOC.cfg" "$TMP/rd/system/etc/firmware/WMT_SOC.cfg"
+    echo "  固件 WMT_SOC.cfg"
+fi
 
 # 4. 重打包 cpio -H newc + gzip
 (cd "$TMP/rd" && find . | cpio -o -H newc 2>/dev/null | gzip -9) > "$TMP/body_new.gz"
