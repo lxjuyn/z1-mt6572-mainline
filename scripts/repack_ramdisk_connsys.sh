@@ -52,6 +52,25 @@ print(f"updated MTK ROOTFS body-size field: {len(body)} (0x{len(body):x})")
 EOF
 cat "$TMP/header" "$TMP/body_new.gz" > "$OUT"
 
+# 7. 同步 Z1 dts 的 chosen linux,initrd-end —— 内核按 DT 区间读 initrd,
+#    body 变大后必须同步 end, 否则内核只读前一段 → gzip 截断 → VFS panic.
+#    (agent 定案: dts mt6572-z1.dts:42 硬编码 0x8420ac7d 只匹配原版 body)
+DTS=${Z1_DTS:-/home/lxj/claude/6572/fork_linux/arch/arm/boot/dts/mediatek/mt6572-z1.dts}
+INITRD_START=0x84100000
+BODY_LEN=$(stat -c%s "$TMP/body_new.gz")
+NEW_END=$(( INITRD_START + BODY_LEN ))
+NEW_END_HEX=$(printf '0x%x' "$NEW_END")
+echo "initrd-end: $INITRD_START + $BODY_LEN = $NEW_END_HEX"
+if grep -q "linux,initrd-end" "$DTS"; then
+    sed -i "s|linux,initrd-end = <0x[0-9a-fA-F]*>;|linux,initrd-end = <$NEW_END_HEX>;|" "$DTS"
+    echo "updated $DTS initrd-end → $NEW_END_HEX"
+    # 重编 dtb
+    make -C /home/lxj/claude/6572/fork_linux ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- dtbs 2>&1 | grep -iE "mt6572-z1|error" | head -2
+    echo "dtb rebuilt"
+else
+    echo "WARN: no linux,initrd-end in $DTS"
+fi
+
 # 6. 校验
 echo "=== 产物: $OUT ==="
 ls -la "$OUT"
