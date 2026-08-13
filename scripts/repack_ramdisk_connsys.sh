@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SRC=${Z1_RAMDISK_SRC:-/home/lxj/claude/6572/out/forensic/linux/ramdisk.gz}
-MODS_SRC=${Z1_MODS_SRC:-/home/lxj/claude/6572/bridge_backups/products/products_connsys_modules_z1vermagic_20260814_015009}
+MODS_SRC=${Z1_MODS_SRC:-/home/lxj/claude/6572/bridge_backups/products/products_connsys_modules_rebuilt_20260814_004806}
 SCRIPT=/home/lxj/claude/6572/scripts/z1_modprobe_connsys.sh
 OUT=${Z1_RAMDISK_OUT:-/home/lxj/claude/6572/out/ramdisk_mainline_connsys.gz}
 TMP=$(mktemp -d /tmp/rdkc_XXXXXX)
@@ -31,6 +31,15 @@ for ko in \
     "$MODS_SRC/wlan/wlan_gen2.ko"; do
     [ -f "$ko" ] || { echo "ERROR: 缺 $ko"; exit 1; }
     cp "$ko" "$TMP/rd/root/connsys/"
+done
+# cfg80211.ko (wlan_gen2 insmod 依赖) + mtk_stp_launcher (WMT patch 应答, func-on 必需)
+#   放在 MODS_SRC 同级: cfg80211.ko 在 $MODS_SRC/cfg80211.ko, launcher 在 $MODS_SRC/mtk_stp_launcher
+for extra in \
+    "$MODS_SRC/cfg80211.ko" \
+    "$MODS_SRC/mtk_stp_launcher"; do
+    [ -f "$extra" ] || { echo "WARN: 缺可选件 $extra (跳过)"; continue; }
+    cp "$extra" "$TMP/rd/root/connsys/"
+    echo "  已加 $extra → /root/connsys/$(basename "$extra")"
 done
 cp "$SCRIPT" "$TMP/rd/root/connsys/z1_modprobe_connsys.sh"
 chmod +x "$TMP/rd/root/connsys/z1_modprobe_connsys.sh"

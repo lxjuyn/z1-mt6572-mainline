@@ -61,9 +61,25 @@ load mtk_wmt_wifi_soc.ko
 load wlan_gen2.ko
 
 # 创建设备节点 (若 mdev 没自动建)
+# major 号与驱动源码一致: WMT_DEV_MAJOR=190, BT_DEV_MAJOR=192 (stp_chrdev_bt.c:47), WIFI_DEV_MAJOR=155 (wmt_chrdev_wifi.c:39)
 [ -e /dev/stpwmt ] || mknod /dev/stpwmt c 190 0 2>/dev/null
-[ -e /dev/stpbt ]  || mknod /dev/stpbt  c 191 0 2>/dev/null
-[ -e /dev/wmtWifi ] || mknod /dev/wmtWifi c 195 0 2>/dev/null
+[ -e /dev/stpbt ]  || mknod /dev/stpbt  c 192 0 2>/dev/null
+[ -e /dev/wmtWifi ] || mknod /dev/wmtWifi c 155 0 2>/dev/null
+
+# 6. WMT patch 守护进程 (func-on 必需)
+#    launcher 应答芯片的 srh_patch 请求, 把 patch 文件名喂给内核 WMT;
+#    没有它 → patchNum=0 → WiFi RAM code 在 func-on 入口死 (BT 不受影响)
+if [ -x "$MODS_DIR/mtk_stp_launcher" ]; then
+    if pgrep -f mtk_stp_launcher >/dev/null 2>&1; then
+        log "[connsys] mtk_stp_launcher 已在跑, 跳过"
+    else
+        log "[connsys] 启动 mtk_stp_launcher -m 3 -p /system/etc/firmware/ (后台)"
+        "$MODS_DIR/mtk_stp_launcher" -m 3 -p /system/etc/firmware/ >/dev/null 2>&1 &
+        log "[connsys] launcher 启动返回 pid $!"
+    fi
+else
+    log "[connsys] 缺 $MODS_DIR/mtk_stp_launcher — WiFi func-on 将失败 (BT 仍可用)"
+fi
 
 echo "=== 加载结果 (cat /proc/modules) ===" >> "$LOG"
 cat /proc/modules | grep -aE "mtk_|wlan|wmt" >> "$LOG"
