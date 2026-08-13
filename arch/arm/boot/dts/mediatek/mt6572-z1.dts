@@ -39,7 +39,7 @@
 		 * so the end must match or the initrd is truncated.
 		 */
 		linux,initrd-start = <0x84100000>;
-		linux,initrd-end = <0x8435d947>;
+		linux,initrd-end = <0x8435d948>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
@@ -143,6 +143,14 @@
 		compatible = "mediatek,btif";
 		#address-cells = <1>;
 		#size-cells = <1>;
+		/*
+		 * ranges needed: btif_rx/btif_tx child nodes are of_iomap'd by
+		 * the vendor driver (hal_dma_set_default_setting). Without
+		 * ranges, of_translate_one fails (drivers/of/address.c) and
+		 * of_iomap returns NULL -> hal_btif_dma_hw_init Oopses on
+		 * NULL base during CONNSYS func-on. Empty ranges = 1:1.
+		 */
+		ranges;
 		reg = <0x1100e000 0x1000>,
 		      <0x11000380 0x80>,
 		      <0x11000400 0x80>;
