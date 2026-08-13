@@ -164,6 +164,16 @@ static const struct mfd_cell mt6323_diagnostic_devs[] = {
 	{
 		.name = "mt6323-regulator",
 		.of_compatible = "mediatek,mt6323-regulator",
+	}, {
+		/*
+		 * Z1: keep regulator-only diagnostic mode (pwrap write-deny blocks
+		 * the IRQ controller init), but still expose the auxadc cell so
+		 * adc-battery gets its IIO channels. mt6323_auxadc_probe only
+		 * needs the pwrap regmap (dev_get_regmap(dev->parent->parent)),
+		 * not the MT6323 IRQ domain, so it works in this mode.
+		 */
+		.name = "mt6323-auxadc",
+		.of_compatible = "mediatek,mt6323-auxadc",
 	},
 };
 
