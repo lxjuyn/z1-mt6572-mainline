@@ -38,7 +38,18 @@ chmod +x "$TMP/rd/root/connsys/z1_modprobe_connsys.sh"
 # 4. 重打包 cpio -H newc + gzip
 (cd "$TMP/rd" && find . | cpio -o -H newc 2>/dev/null | gzip -9) > "$TMP/body_new.gz"
 
-# 5. 512B 头前置拼回
+# 5. 512B 头前置拼回 — 更新 MTK ROOTFS 头的 body 大小字段 (offset 4-8, LE u32)
+#    否则 LK 只读原 body 长度, 重打包更大的 body 被截断 → VFS mount 失败
+python3 - "$TMP/header" "$TMP/body_new.gz" <<'EOF'
+import struct, sys
+hdr_path, body_path = sys.argv[1], sys.argv[2]
+body = open(body_path, 'rb').read()
+hdr = bytearray(open(hdr_path, 'rb').read())
+assert hdr[0:4] == b'\x88\x16\x88\x58', f"unexpected MTK header magic: {hdr[0:4].hex()}"
+hdr[4:8] = struct.pack('<I', len(body))
+open(hdr_path, 'wb').write(hdr)
+print(f"updated MTK ROOTFS body-size field: {len(body)} (0x{len(body):x})")
+EOF
 cat "$TMP/header" "$TMP/body_new.gz" > "$OUT"
 
 # 6. 校验
