@@ -9,32 +9,38 @@
 # 用法: sh z1_modprobe_connsys.sh [模块目录]
 # 默认模块目录: /root/connsys (ramdisk 部署位置)
 # 环境变量 Z1_MODS_DIR 可覆盖
+#
+# ⚠️ busybox 限制: 无 tee / 无 lsmod, 一律改用 echo 重定向 + cat /proc/modules
+# 只用 busybox 有的命令: cat/echo/insmod/mknod/ls/grep/[/:/test
 
 set -u
 MODS_DIR="${Z1_MODS_DIR:-/root/connsys}"
 LOG=/tmp/connsys_load.log
 : > "$LOG"
 
-echo "[connsys] 模块目录: $MODS_DIR" | tee -a "$LOG"
-[ -d "$MODS_DIR" ] || { echo "ERROR: $MODS_DIR 不存在" | tee -a "$LOG"; exit 1; }
+log() { echo "$@" >> "$LOG"; echo "$@"; }
+
+log "[connsys] 模块目录: $MODS_DIR"
+[ -d "$MODS_DIR" ] || { echo "ERROR: $MODS_DIR 不存在" >> "$LOG"; echo "ERROR: $MODS_DIR 不存在"; exit 1; }
 
 # 前置: cfg80211 (wlan 需要), 通常内核已内编则跳过
 if ! ls /sys/module/cfg80211 >/dev/null 2>&1; then
-    echo "[connsys] 加载 cfg80211..." | tee -a "$LOG"
-    insmod "$MODS_DIR/cfg80211.ko" 2>/dev/null || echo "  (cfg80211 内核内编或加载失败, 继续)" | tee -a "$LOG"
+    log "[connsys] 加载 cfg80211..."
+    insmod "$MODS_DIR/cfg80211.ko" 2>/dev/null || echo "  (cfg80211 内核内编或加载失败, 继续)" >> "$LOG"
 fi
 
 load() {
-    local ko="$1"
+    ko="$1"
     if [ -f "$MODS_DIR/$ko" ]; then
-        echo "[connsys] insmod $ko ..." | tee -a "$LOG"
-        if insmod "$MODS_DIR/$ko" 2>&1 | tee -a "$LOG"; then
-            echo "  OK: $ko" | tee -a "$LOG"
+        log "[connsys] insmod $ko ..."
+        if insmod "$MODS_DIR/$ko" >> "$LOG" 2>&1; then
+            log "  OK: $ko"
         else
-            echo "  FAIL: $ko (rc=$?) — 继续下一个, 记录错误" | tee -a "$LOG"
+            rc=$?
+            log "  FAIL: $ko (rc=$rc) — 继续下一个, 记录错误"
         fi
     else
-        echo "[connsys] 缺失 $ko (跳过)" | tee -a "$LOG"
+        log "[connsys] 缺失 $ko (跳过)"
     fi
 }
 
@@ -59,13 +65,13 @@ load wlan_gen2.ko
 [ -e /dev/stpbt ]  || mknod /dev/stpbt  c 191 0 2>/dev/null
 [ -e /dev/wmtWifi ] || mknod /dev/wmtWifi c 195 0 2>/dev/null
 
-echo "=== 加载结果 (lsmod) ===" | tee -a "$LOG"
-lsmod | grep -aE "mtk_|wlan|wmt" | tee -a "$LOG"
+echo "=== 加载结果 (cat /proc/modules) ===" >> "$LOG"
+cat /proc/modules | grep -aE "mtk_|wlan|wmt" >> "$LOG"
 
-echo "=== 验证 ===" | tee -a "$LOG"
-echo "BTIF 传输: $(ls /sys/bus/platform/devices/ 2>/dev/null | grep -c btif) 个 btif 设备" | tee -a "$LOG"
-ls /dev/stpwmt /dev/stpbt /dev/wmtWifi 2>/dev/null | tee -a "$LOG"
-echo "WiFi: $(ls /sys/class/net/ 2>/dev/null | grep -c wlan) 个 wlan 接口 (需 func-on 后出现)" | tee -a "$LOG"
+echo "=== 验证 ===" >> "$LOG"
+echo "BTIF 传输: $(ls /sys/bus/platform/devices/ 2>/dev/null | grep -c btif) 个 btif 设备" >> "$LOG"
+ls /dev/stpwmt /dev/stpbt /dev/wmtWifi 2>/dev/null >> "$LOG"
+echo "WiFi: $(ls /sys/class/net/ 2>/dev/null | grep -c wlan) 个 wlan 接口 (需 func-on 后出现)" >> "$LOG"
 
-echo "[connsys] 完成. 日志: $LOG" | tee -a "$LOG"
-echo "[connsys] 下一步: echo 1 > /dev/wmtWifi (WiFi func-on), 固件部署见 scripts/deploy_connsys_fw.sh" | tee -a "$LOG"
+log "[connsys] 完成. 日志: $LOG"
+log "[connsys] 下一步: echo 1 > /dev/wmtWifi (WiFi func-on), 固件部署见 scripts/deploy_connsys_fw.sh"
