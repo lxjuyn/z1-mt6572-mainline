@@ -39,7 +39,7 @@
 		 * so the end must match or the initrd is truncated.
 		 */
 		linux,initrd-start = <0x84100000>;
-		linux,initrd-end = <0x842c7160>;
+		linux,initrd-end = <0x842c6cc8>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
