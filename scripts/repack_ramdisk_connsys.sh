@@ -107,6 +107,23 @@ if [ -n "$IW_SRC" ]; then
 else
     echo "WARN: 缺 iw (nl80211) — 上板无法 scan (iwlist/WEXT 对 wlan_gen2 不支持). 用 Z1_IW_BIN 指定"
 fi
+# 蓝牙栈 (内核 BT 模块 + 用户态工具) → /root/connsys/bt — 上板测 BT (vhci 桥路线)
+#   ko: bluetooth/ecc/ecdh_generic/hci_vhci/hidp/uhid (vermagic -z1+)
+#   tools: stpbt-vhci-bridge / stpbt-hci-test / hci-localver / btup-scan / btif-lpbk-test
+BT_SRC=${Z1_BT_SRC:-/home/lxj/claude/6572/bridge_backups/products/products_bt_stack_20260814_204345}
+if [ -d "$BT_SRC/ko" ]; then
+    mkdir -p "$TMP/rd/root/connsys/bt/ko" "$TMP/rd/root/connsys/bt/tools"
+    for ko in "$BT_SRC"/ko/*.ko; do
+        [ -f "$ko" ] && cp "$ko" "$TMP/rd/root/connsys/bt/ko/" && echo "  BT ko $(basename "$ko")"
+    done
+    for t in "$BT_SRC"/tools/*; do
+        if [ -f "$t" ] && [ -x "$t" ]; then
+            cp "$t" "$TMP/rd/root/connsys/bt/tools/"
+            chmod +x "$TMP/rd/root/connsys/bt/tools/$(basename "$t")"
+            echo "  BT tool $(basename "$t")"
+        fi
+    done
+fi
 
 # 4. 重打包 cpio -H newc + 压缩 (默认 xz, 内核 CONFIG_RD_XZ=y; 必须 --check=crc32, xz 默认 CRC64 内核解不了)
 #    Z1_RAMDISK_COMPRESS=gzip 可回退
