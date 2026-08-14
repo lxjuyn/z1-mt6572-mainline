@@ -69,7 +69,9 @@ load wlan_gen2.ko
 # 6. WMT patch 守护进程 (func-on 必需)
 #    launcher 应答芯片的 srh_patch 请求, 把 patch 文件名喂给内核 WMT;
 #    没有它 → patchNum=0 → WiFi RAM code 在 func-on 入口死 (BT 不受影响)
+LAUNCHER_PRESENT=0
 if [ -x "$MODS_DIR/mtk_stp_launcher" ]; then
+    LAUNCHER_PRESENT=1
     if pgrep -f mtk_stp_launcher >/dev/null 2>&1; then
         log "[connsys] mtk_stp_launcher 已在跑, 跳过"
     else
@@ -79,6 +81,38 @@ if [ -x "$MODS_DIR/mtk_stp_launcher" ]; then
     fi
 else
     log "[connsys] 缺 $MODS_DIR/mtk_stp_launcher — WiFi func-on 将失败 (BT 仍可用)"
+fi
+
+# 6b. 等 launcher 就绪 (func-on 不撞 SET_STP_MODE 竞态窗口, CONNSYS 稳定性修复 D)
+#    launcher 的 SET_STP_MODE ioctl 是 fire-and-forget (timeoutValue=0, 入队即返回),
+#    无法直接观测"完成"; 用 wmtd 线程处理 HIF_CONF op 后必打的 dmesg 标志近似就绪:
+#      "WMT HIF info added" = wmtInfoBit 已置 + hifType 已定 → func-on 不会撞 "no hif info"
+#      "patch total num"    = launcher 首次上电 (LPBK func-on + patch 下载) 已完成
+#    即使内核已按方案 C 默认 BTIF, 此等待仍给 sw_init 的 srh_patch (2s 超时) 留出
+#    launcher 在线窗口。busybox 兼容: while + sleep 1 + dmesg | grep, 最多 ~20s。
+if [ "$LAUNCHER_PRESENT" -eq 1 ]; then
+    LAUNCHER_READY=0
+    i=0
+    while [ $i -lt 20 ]; do
+        if dmesg | grep -q "WMT HIF info added"; then
+            LAUNCHER_READY=1
+            log "[connsys] launcher 就绪: 见 WMT HIF info added (第 ${i}s)"
+            break
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    [ "$LAUNCHER_READY" -eq 1 ] || log "[connsys] 警告: 20s 未见 WMT HIF info added — func-on 靠内核默认 BTIF (方案C), launcher 可能未完成 SET_STP_MODE"
+
+    i=0
+    while [ $i -lt 15 ]; do
+        if dmesg | grep -q "patch total num"; then
+            log "[connsys] launcher 首次上电完成: 见 patch total num (第 ${i}s)"
+            break
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
 fi
 
 echo "=== 加载结果 (cat /proc/modules) ===" >> "$LOG"

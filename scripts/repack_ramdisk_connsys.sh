@@ -5,8 +5,15 @@
 set -euo pipefail
 
 SRC=${Z1_RAMDISK_SRC:-/home/lxj/claude/6572/out/forensic/linux/ramdisk.gz}
-MODS_SRC=${Z1_MODS_SRC:-/home/lxj/claude/6572/bridge_backups/products/products_connsys_modules_rebuilt_20260814_004806}
+# 模块源 — 用 z1vermagic 产物: 全部 ko vermagic=7.0.0-rc7-z1+ 匹配 CONFIG_LOCALVERSION="-z1" 内核
+#   (旧默认 products_connsys_modules_rebuilt_20260814_004806 的 ko 是 7.0.0-rc7-g2cd361bd40c7-dirty,
+#    对 z1+ 内核 insmod 会被拒载 — 上板成功用的就是本 z1vermagic 目录, 见 WIFI_FUNC_ON_SUCCESS_20260814.md)
+MODS_SRC=${Z1_MODS_SRC:-/home/lxj/claude/6572/bridge_backups/products/products_connsys_modules_z1vermagic_20260814_015009}
 FW_SRC=${Z1_FW_SRC:-/home/lxj/claude/6572/out/firmware_backup/firmware}
+# iw (nl80211, 静态 ARM) — wlan_gen2 只支持 nl80211 scan, iwlist/WEXT 报不支持
+#   (iw_arm_static_stripped = products_iw_nl80211_20260814_144324, sha256 38b5be3c...)
+IW_BIN=${Z1_IW_BIN:-/home/lxj/claude/6572/bridge_backups/products/products_iw_nl80211_20260814_144324/iw_arm_static_stripped}
+# 备选: 老 wifi_tools 产物目录 (iwconfig/iwlist/iwpriv, WEXT 用; 仅当上面 iw 缺失时试 $TOOLS_SRC/iw)
 TOOLS_SRC=${Z1_TOOLS_SRC:-/home/lxj/claude/6572/bridge_backups/products/products_wifi_tools_20260814_131306/bin}
 SCRIPT=/home/lxj/claude/6572/scripts/z1_modprobe_connsys.sh
 OUT=${Z1_RAMDISK_OUT:-/home/lxj/claude/6572/out/ramdisk_mainline_connsys.gz}
@@ -46,6 +53,16 @@ done
 cp "$SCRIPT" "$TMP/rd/root/connsys/z1_modprobe_connsys.sh"
 chmod +x "$TMP/rd/root/connsys/z1_modprobe_connsys.sh"
 
+# 上板一键验证脚本 → /root/connsys/ (下次开机直接 sh /root/connsys/z1_connsys_onboard_test.sh)
+ONBOARD=/home/lxj/claude/6572/scripts/z1_connsys_onboard_test.sh
+if [ -f "$ONBOARD" ]; then
+    cp "$ONBOARD" "$TMP/rd/root/connsys/z1_connsys_onboard_test.sh"
+    chmod +x "$TMP/rd/root/connsys/z1_connsys_onboard_test.sh"
+    echo "  脚本 z1_connsys_onboard_test.sh → /root/connsys/"
+else
+    echo "WARN: 缺上板验证脚本 $ONBOARD — 需手工推送或用 PC 端跑"
+fi
+
 # 3.5 塞 CONNSYS 固件 (WMT_init 读 /system/etc/firmware/WMT_SOC.cfg, wlan request_firmware WIFI_RAM_CODE_*)
 #    WMT_SOC.cfg 缺失 → wmt_conf_read_file 失败 → wmt_lib_init(-1) → mtk_stp_wmt_soc insmod 失败 (上板实测)
 mkdir -p "$TMP/rd/lib/firmware" "$TMP/rd/system/etc/firmware"
@@ -75,16 +92,20 @@ if [ -f "$NVRAM_SRC" ]; then
     echo "  固件 NVRAM WIFI (512B, MAC 20:72:0d:39:0d:1f)"
 fi
 # 测试无线工具 (静态 ARM) → /usr/bin — 上板测 WiFi scan 用
-# 优先 iw (nl80211, wlan_gen2 只支持 nl80211 scan); iwlist 是 WEXT 不支持 scan, 去掉省空间
-if [ -d "$TOOLS_SRC" ]; then
+# 优先 nl80211 iw (wlan_gen2 只支持 nl80211 scan); iwlist 是 WEXT 不支持 scan, 去掉省空间
+IW_SRC=""
+if [ -f "$IW_BIN" ]; then
+    IW_SRC="$IW_BIN"
+elif [ -f "$TOOLS_SRC/iw" ]; then
+    IW_SRC="$TOOLS_SRC/iw"
+fi
+if [ -n "$IW_SRC" ]; then
     mkdir -p "$TMP/rd/usr/bin"
-    for t in iw; do
-        if [ -f "$TOOLS_SRC/$t" ]; then
-            cp "$TOOLS_SRC/$t" "$TMP/rd/usr/bin/$t"
-            chmod +x "$TMP/rd/usr/bin/$t"
-            echo "  工具 $t (静态 ARM, nl80211)"
-        fi
-    done
+    cp "$IW_SRC" "$TMP/rd/usr/bin/iw"
+    chmod +x "$TMP/rd/usr/bin/iw"
+    echo "  工具 iw ← $IW_SRC ($(stat -c%s "$IW_SRC") B, nl80211 静态 ARM)"
+else
+    echo "WARN: 缺 iw (nl80211) — 上板无法 scan (iwlist/WEXT 对 wlan_gen2 不支持). 用 Z1_IW_BIN 指定"
 fi
 
 # 4. 重打包 cpio -H newc + 压缩 (默认 xz, 内核 CONFIG_RD_XZ=y; 必须 --check=crc32, xz 默认 CRC64 内核解不了)
