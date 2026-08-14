@@ -7,6 +7,7 @@ set -euo pipefail
 SRC=${Z1_RAMDISK_SRC:-/home/lxj/claude/6572/out/forensic/linux/ramdisk.gz}
 MODS_SRC=${Z1_MODS_SRC:-/home/lxj/claude/6572/bridge_backups/products/products_connsys_modules_rebuilt_20260814_004806}
 FW_SRC=${Z1_FW_SRC:-/home/lxj/claude/6572/out/firmware_backup/firmware}
+TOOLS_SRC=${Z1_TOOLS_SRC:-/home/lxj/claude/6572/bridge_backups/products/products_wifi_tools_20260814_131306/bin}
 SCRIPT=/home/lxj/claude/6572/scripts/z1_modprobe_connsys.sh
 OUT=${Z1_RAMDISK_OUT:-/home/lxj/claude/6572/out/ramdisk_mainline_connsys.gz}
 TMP=$(mktemp -d /tmp/rdkc_XXXXXX)
@@ -49,20 +50,16 @@ chmod +x "$TMP/rd/root/connsys/z1_modprobe_connsys.sh"
 #    WMT_SOC.cfg 缺失 → wmt_conf_read_file 失败 → wmt_lib_init(-1) → mtk_stp_wmt_soc insmod 失败 (上板实测)
 mkdir -p "$TMP/rd/lib/firmware" "$TMP/rd/system/etc/firmware"
 # WIFI RAM code: wlan_gen2 请求顺序 WIFI_RAM_CODE_MT6582 → WIFI_RAM_CODE_SOC → WIFI_RAM_CODE
-# 只放前两份 (MT6582 + SOC), 第三份 WIFI_RAM_CODE 是 fallback 保险, 去掉省 ~160KB 让 boot.img ≤6MB
-for name in WIFI_RAM_CODE_MT6582 WIFI_RAM_CODE_SOC; do
-    if [ -f "$FW_SRC/WIFI_RAM_CODE_SOC" ]; then
-        cp "$FW_SRC/WIFI_RAM_CODE_SOC" "$TMP/rd/lib/firmware/$name"
-        echo "  固件 $name ← WIFI_RAM_CODE_SOC"
-    fi
-done
-# WMT patch (launcher 喂内核, 原名 + ROMv1_patch_N_hdr.bin fallback 名)
+# 只放 MT6582 (首选名), 内容与 SOC 相同, 删重复份省 ~160KB 让 boot.img ≤6MB
+if [ -f "$FW_SRC/WIFI_RAM_CODE_SOC" ]; then
+    cp "$FW_SRC/WIFI_RAM_CODE_SOC" "$TMP/rd/lib/firmware/WIFI_RAM_CODE_MT6582"
+    echo "  固件 WIFI_RAM_CODE_MT6582 ← WIFI_RAM_CODE_SOC"
+fi
+# WMT patch (launcher 喂内核, 只留 ROMv1_patch_N_hdr.bin fallback 名, 删原名重复份省 ~58KB)
 if [ -f "$FW_SRC/mt6572_82_patch_e1_0_hdr.bin" ] && [ -f "$FW_SRC/mt6572_82_patch_e1_1_hdr.bin" ]; then
-    cp "$FW_SRC/mt6572_82_patch_e1_0_hdr.bin" "$TMP/rd/system/etc/firmware/mt6572_82_patch_e1_0_hdr.bin"
-    cp "$FW_SRC/mt6572_82_patch_e1_1_hdr.bin" "$TMP/rd/system/etc/firmware/mt6572_82_patch_e1_1_hdr.bin"
     cp "$FW_SRC/mt6572_82_patch_e1_0_hdr.bin" "$TMP/rd/system/etc/firmware/ROMv1_patch_0_hdr.bin"
     cp "$FW_SRC/mt6572_82_patch_e1_1_hdr.bin" "$TMP/rd/system/etc/firmware/ROMv1_patch_1_hdr.bin"
-    echo "  固件 mt6572_82_patch_e1_{0,1} + ROMv1_patch_{0,1}"
+    echo "  固件 ROMv1_patch_{0,1}_hdr.bin (删原名重复份)"
 fi
 # WMT_SOC.cfg (内核 filp_open 绝对路径读)
 if [ -f "$FW_SRC/WMT_SOC.cfg" ]; then
@@ -77,9 +74,27 @@ if [ -f "$NVRAM_SRC" ]; then
     cp "$NVRAM_SRC" "$TMP/rd/etc/firmware/nvram/WIFI"
     echo "  固件 NVRAM WIFI (512B, MAC 20:72:0d:39:0d:1f)"
 fi
+# 测试无线工具 (静态 ARM) → /usr/bin — 上板测 WiFi scan 用
+# 只留 scan 必需的 iwlist; iwconfig 删 (busybox 自带 ifconfig 可替代 up), 省 ~500KB 让 boot.img ≤6MB
+if [ -d "$TOOLS_SRC" ]; then
+    mkdir -p "$TMP/rd/usr/bin"
+    for t in iwlist; do
+        if [ -f "$TOOLS_SRC/$t" ]; then
+            cp "$TOOLS_SRC/$t" "$TMP/rd/usr/bin/$t"
+            chmod +x "$TMP/rd/usr/bin/$t"
+            echo "  工具 $t (静态 ARM)"
+        fi
+    done
+fi
 
-# 4. 重打包 cpio -H newc + gzip
-(cd "$TMP/rd" && find . | cpio -o -H newc 2>/dev/null | gzip -9) > "$TMP/body_new.gz"
+# 4. 重打包 cpio -H newc + 压缩 (默认 xz -9e 更小, 内核 CONFIG_RD_XZ=y 支持解压; Z1_RAMDISK_COMPRESS=gzip 可回退)
+COMP=${Z1_RAMDISK_COMPRESS:-xz}
+case "$COMP" in
+    gzip) (cd "$TMP/rd" && find . | cpio -o -H newc 2>/dev/null | gzip -9) > "$TMP/body_new.gz" ;;
+    xz)   (cd "$TMP/rd" && find . | cpio -o -H newc 2>/dev/null | xz -9e -c) > "$TMP/body_new.gz" ;;
+    *) echo "ERROR: 未知压缩方式 $COMP (gzip/xz)"; exit 1 ;;
+esac
+echo "  body 压缩: $COMP"
 
 # 5. 512B 头前置拼回 — 更新 MTK ROOTFS 头的 body 大小字段 (offset 4-8, LE u32)
 #    否则 LK 只读原 body 长度, 重打包更大的 body 被截断 → VFS mount 失败
