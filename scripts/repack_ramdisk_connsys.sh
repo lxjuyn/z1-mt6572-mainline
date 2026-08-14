@@ -75,14 +75,14 @@ if [ -f "$NVRAM_SRC" ]; then
     echo "  固件 NVRAM WIFI (512B, MAC 20:72:0d:39:0d:1f)"
 fi
 # 测试无线工具 (静态 ARM) → /usr/bin — 上板测 WiFi scan 用
-# 只留 scan 必需的 iwlist; iwconfig 删 (busybox 自带 ifconfig 可替代 up), 省 ~500KB 让 boot.img ≤6MB
+# 优先 iw (nl80211, wlan_gen2 只支持 nl80211 scan); iwlist 是 WEXT 不支持 scan, 去掉省空间
 if [ -d "$TOOLS_SRC" ]; then
     mkdir -p "$TMP/rd/usr/bin"
-    for t in iwlist; do
+    for t in iw; do
         if [ -f "$TOOLS_SRC/$t" ]; then
             cp "$TOOLS_SRC/$t" "$TMP/rd/usr/bin/$t"
             chmod +x "$TMP/rd/usr/bin/$t"
-            echo "  工具 $t (静态 ARM)"
+            echo "  工具 $t (静态 ARM, nl80211)"
         fi
     done
 fi
