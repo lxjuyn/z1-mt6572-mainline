@@ -87,14 +87,15 @@ if [ -d "$TOOLS_SRC" ]; then
     done
 fi
 
-# 4. 重打包 cpio -H newc + 压缩 (默认 xz -9e 更小, 内核 CONFIG_RD_XZ=y 支持解压; Z1_RAMDISK_COMPRESS=gzip 可回退)
+# 4. 重打包 cpio -H newc + 压缩 (默认 xz, 内核 CONFIG_RD_XZ=y; 必须 --check=crc32, xz 默认 CRC64 内核解不了)
+#    Z1_RAMDISK_COMPRESS=gzip 可回退
 COMP=${Z1_RAMDISK_COMPRESS:-xz}
 case "$COMP" in
     gzip) (cd "$TMP/rd" && find . | cpio -o -H newc 2>/dev/null | gzip -9) > "$TMP/body_new.gz" ;;
-    xz)   (cd "$TMP/rd" && find . | cpio -o -H newc 2>/dev/null | xz -9e -c) > "$TMP/body_new.gz" ;;
+    xz)   (cd "$TMP/rd" && find . | cpio -o -H newc 2>/dev/null | xz -9 --check=crc32 -c) > "$TMP/body_new.gz" ;;
     *) echo "ERROR: 未知压缩方式 $COMP (gzip/xz)"; exit 1 ;;
 esac
-echo "  body 压缩: $COMP"
+echo "  body 压缩: $COMP (xz 用 --check=crc32, 内核兼容)"
 
 # 5. 512B 头前置拼回 — 更新 MTK ROOTFS 头的 body 大小字段 (offset 4-8, LE u32)
 #    否则 LK 只读原 body 长度, 重打包更大的 body 被截断 → VFS mount 失败
