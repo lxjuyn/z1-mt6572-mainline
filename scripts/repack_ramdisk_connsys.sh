@@ -30,6 +30,32 @@ mkdir -p "$TMP/rd"
 gzip -dc "$TMP/body.gz" | (cd "$TMP/rd" && cpio -idmu 2>/dev/null)
 [ -x "$TMP/rd/bin/busybox" ] || { echo "ERROR: 非 busybox rootfs"; exit 1; }
 
+# 2.5 喂狗注入 (Z1_WATCHDOG_FEED=1 时) — 消除 LK 遗留 HW WDT 饿死复位 (~19.7s)
+#    busybox watchdog -t 5 -T 10 /dev/watchdog 后台喂; 失败 fallback echo V
+if [ "${Z1_WATCHDOG_FEED:-0}" = "1" ]; then
+    if python3 - "$TMP/rd/init" <<'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+marker = "# Drop to a fallback shell"
+inject = """# Feed the watchdog so the ~19.7s LK-armed HW WDT doesn't bite (boot stability fix)
+if [ -e /dev/watchdog ]; then
+  $BB echo "[init] feeding watchdog /dev/watchdog (WDT bite prevention)"
+  ($BB watchdog -t 5 -T 10 /dev/watchdog 2>/dev/null || $BB echo V > /dev/watchdog 2>/dev/null) &
+fi
+
+"""
+if marker in src and "feeding watchdog" not in src:
+    open(path, 'w').write(src.replace(marker, inject + marker, 1))
+    print("[repack] watchdog feed injected into init")
+else:
+    print("[repack] init watchdog feed already present or marker missing")
+PYEOF
+    then
+        :
+    fi
+fi
+
 # 3. 塞 CONNSYS 模块到 /root/connsys
 mkdir -p "$TMP/rd/root/connsys"
 for ko in \
