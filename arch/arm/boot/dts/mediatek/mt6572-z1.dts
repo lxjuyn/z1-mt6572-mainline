@@ -322,6 +322,26 @@
 };
 
 /*
+ * vmc/vmch (eMMC card power) + vusb (USB PHY): same zero-consumer trap as
+ * VEMC.  mt6323.dtsi marks them regulator-boot-on (LK leaves them on) but
+ * without always-on, regulator late-cleanup powers them off ~39.5s into boot
+ * and the board resets (Jump to BL / preloader reboot loop).  Keep all three
+ * on to stop the ~39s reboot cycle.  Z1 mmc0 has no vmmc-supply (fork skips
+ * mmc_regulator_get_supply) so they have zero consumers and must be held up.
+ */
+&mt6323_vmc_reg {
+	regulator-always-on;
+};
+
+&mt6323_vmch_reg {
+	regulator-always-on;
+};
+
+&mt6323_vusb_reg {
+	regulator-always-on;
+};
+
+/*
  * PMIC power/home keys.  The MT6323 "home" key maps to KEY_VOLUMEDOWN (114)
  * which duplicates the matrix keypad MATRIX_KEY(1, 0, KEY_VOLUMEDOWN) (see
  * &keyboard).  Disable the PMIC home key so volume-down is reported once;
