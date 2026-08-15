@@ -20,6 +20,10 @@ ADBD_BIN=${Z1_ADBD_BIN:-/home/lxj/claude/6572/out/boot_extracted/rd/sbin/adbd}
 ADB_SETUP=/home/lxj/claude/6572/scripts/z1_adb_setup.sh
 SCRIPT=/home/lxj/claude/6572/scripts/z1_modprobe_connsys.sh
 OUT=${Z1_RAMDISK_OUT:-/home/lxj/claude/6572/out/ramdisk_mainline_connsys.gz}
+if [ "${Z1_ALPINE_SWITCH:-0}" = "1" ] && [ -z "${Z1_RAMDISK_OUT:-}" ]; then
+    OUT=/home/lxj/claude/6572/out/ramdisk_alpine_switch.gz
+fi
+ALPINE_INIT=${Z1_ALPINE_INIT:-/home/lxj/claude/6572/scripts/z1_alpine_switch_init.sh}
 TMP=$(mktemp -d /tmp/rdkc_XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -36,7 +40,7 @@ gzip -dc "$TMP/body.gz" | (cd "$TMP/rd" && cpio -idmu 2>/dev/null)
 # 2.5 喂狗注入 (Z1_WATCHDOG_FEED=1 时) — 消除 LK 遗留 HW WDT 饿死复位 (~19.7s/~30.5s)
 #    常驻循环喂狗 (P6_EOD_VERDICT 判定: 一次性 echo V 不常驻 → WDT 30.5s 仍咬死)
 #    busybox watchdog -t 5 -T 10 若可用且不退出则常驻; 否则 while 循环 echo V 常驻
-if [ "${Z1_WATCHDOG_FEED:-0}" = "1" ]; then
+if [ "${Z1_WATCHDOG_FEED:-0}" = "1" ] && [ "${Z1_ALPINE_SWITCH:-0}" != "1" ]; then
     if python3 - "$TMP/rd/init" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -69,7 +73,7 @@ fi
 # 2.6 getty 修复 (Z1_GETTY_FIX=1 时) — shell 卡死根因修复 R2
 #    /dev/console 交互 shell 内核强制 O_NONBLOCK+noctty → 改 ttyS0 真设备 + CLOCAL
 #    恢复 ttyGS0 等待循环 (gadget 异步 probe 需等节点)
-if [ "${Z1_GETTY_FIX:-0}" = "1" ]; then
+if [ "${Z1_GETTY_FIX:-0}" = "1" ] && [ "${Z1_ALPINE_SWITCH:-0}" != "1" ]; then
     if python3 - "$TMP/rd/init" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -121,7 +125,22 @@ PYEOF
     fi
 fi
 
+# 2.7 Alpine switch init (Z1_ALPINE_SWITCH=1)
+#   用 scripts/z1_alpine_switch_init.sh 整体替换 /init (方案A: 挂 p4 + switch_root)
+#   该脚本自带喂狗/恢复 shell, 不再需要 2.5/2.6 注入。Alpine 版 ramdisk 保持最小
+#   (connsys 模块/iw/固件/adb/BT 部署到 Alpine rootfs, 见 ALPINE_FULL_PLAN)
+if [ "${Z1_ALPINE_SWITCH:-0}" = "1" ]; then
+    if [ ! -f "$ALPINE_INIT" ]; then
+        echo "ERROR: Z1_ALPINE_SWITCH=1 但缺 $ALPINE_INIT"; exit 1
+    fi
+    cp "$ALPINE_INIT" "$TMP/rd/init"
+    chmod 0755 "$TMP/rd/init"
+    echo "[repack] Alpine switch /init installed (from $ALPINE_INIT)"
+fi
+
 # 3. 塞 CONNSYS 模块到 /root/connsys
+# (Alpine 模式 Z1_ALPINE_SWITCH=1 跳过全部内容注入 — 模块/固件/iw/adb/BT 部署到 Alpine rootfs)
+if [ "${Z1_ALPINE_SWITCH:-0}" != "1" ]; then
 mkdir -p "$TMP/rd/root/connsys"
 for ko in \
     "$MODS_SRC/btif/mtk_btif_drv.ko" \
@@ -229,6 +248,7 @@ if [ -d "$BT_SRC/ko" ]; then
         fi
     done
 fi
+fi  # Z1_ALPINE_SWITCH content-injection gate
 
 # 4. 重打包 cpio -H newc + 压缩 (默认 xz, 内核 CONFIG_RD_XZ=y; 必须 --check=crc32, xz 默认 CRC64 内核解不了)
 #    Z1_RAMDISK_COMPRESS=gzip 可回退
