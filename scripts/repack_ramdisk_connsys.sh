@@ -74,14 +74,15 @@ src = open(path).read()
 
 ttygs0_marker = "# Console on USB ACM (ttyGS0) and on framebuffer (tty0 if present)"
 ttygs0_wait = """# Console on USB ACM (ttyGS0) and on framebuffer (tty0 if present)
-# Continuous ttyGS0 getty: USB may be plugged any time after boot.  Loop until
-# the gadget node appears (gadget enumerates on USB plug), then start getty.
-# A fixed 5s wait missed late USB plugs (getty died before node existed).
+# Single ttyGS0 getty (root cause of '>' continuation: two gettys raced termios).
+# Loop until gadget node appears (USB plug any time), stty the tty (pin ICANON/
+# ICRNL/ECHO so ash line editor commits on CR/LF), then getty with setsid.
 (
   i=0
   while [ $i -lt 600 ]; do
     if [ -e /dev/ttyGS0 ]; then
-      exec $BB getty -L -n -l /bin/sh 115200 ttyGS0 vt100
+      $BB stty -F /dev/ttyGS0 115200 icanon icrnl onlcr echo isig ixon opost 2>/dev/null
+      exec setsid $BB getty -L -n -l /bin/sh 115200 ttyGS0 vt100
     fi
     $BB mdev -s 2>/dev/null
     $BB sleep 1
@@ -89,6 +90,16 @@ ttygs0_wait = """# Console on USB ACM (ttyGS0) and on framebuffer (tty0 if prese
   done
 ) </dev/null >/dev/null 2>&1 &
 """
+# 5.1: delete the old direct getty line (was racing the wait-loop getty)
+old_direct = "$BB setsid $BB sh -c 'exec $BB getty -L -n -l /bin/sh 115200 ttyGS0 vt100' </dev/ttyGS0 >/dev/ttyGS0 2>&1 &\n"
+if old_direct in src:
+    src = src.replace(old_direct, "", 1)
+
+# 5.1b: also tolerate the non -L variant of the old direct line
+old_direct2 = "$BB setsid $BB sh -c 'exec $BB getty -n -l /bin/sh 115200 ttyGS0 vt100' </dev/ttyGS0 >/dev/ttyGS0 2>&1 &\n"
+if old_direct2 in src:
+    src = src.replace(old_direct2, "", 1)
+
 if ttygs0_marker in src and "wait for /dev/ttyGS0" not in src:
     src = src.replace(ttygs0_marker, ttygs0_wait, 1)
 
