@@ -30,24 +30,31 @@ mkdir -p "$TMP/rd"
 gzip -dc "$TMP/body.gz" | (cd "$TMP/rd" && cpio -idmu 2>/dev/null)
 [ -x "$TMP/rd/bin/busybox" ] || { echo "ERROR: 非 busybox rootfs"; exit 1; }
 
-# 2.5 喂狗注入 (Z1_WATCHDOG_FEED=1 时) — 消除 LK 遗留 HW WDT 饿死复位 (~19.7s)
-#    busybox watchdog -t 5 -T 10 /dev/watchdog 后台喂; 失败 fallback echo V
+# 2.5 喂狗注入 (Z1_WATCHDOG_FEED=1 时) — 消除 LK 遗留 HW WDT 饿死复位 (~19.7s/~30.5s)
+#    常驻循环喂狗 (P6_EOD_VERDICT 判定: 一次性 echo V 不常驻 → WDT 30.5s 仍咬死)
+#    busybox watchdog -t 5 -T 10 若可用且不退出则常驻; 否则 while 循环 echo V 常驻
 if [ "${Z1_WATCHDOG_FEED:-0}" = "1" ]; then
     if python3 - "$TMP/rd/init" <<'PYEOF'
 import sys
 path = sys.argv[1]
 src = open(path).read()
 marker = "# Drop to a fallback shell"
-inject = """# Feed the watchdog so the ~19.7s LK-armed HW WDT doesn't bite (boot stability fix)
+inject = """# Feed the watchdog so the LK-armed HW WDT doesn't bite (~19.7s/~30.5s reboot).
+# Persistent loop: one-shot echo V dies with its subshell -> WDT still bites.
 if [ -e /dev/watchdog ]; then
-  $BB echo "[init] feeding watchdog /dev/watchdog (WDT bite prevention)"
-  ($BB watchdog -t 5 -T 10 /dev/watchdog 2>/dev/null || $BB echo V > /dev/watchdog 2>/dev/null) &
+  $BB echo "[init] feeding watchdog /dev/watchdog (persistent loop)"
+  # busybox watchdog (daemon) if usable, else fallback echo V loop
+  if $BB watchdog -t 5 -T 10 /dev/watchdog >/dev/null 2>&1; then
+    :
+  else
+    (while true; do $BB echo V > /dev/watchdog 2>/dev/null; $BB sleep 5; done) &
+  fi
 fi
 
 """
 if marker in src and "feeding watchdog" not in src:
     open(path, 'w').write(src.replace(marker, inject + marker, 1))
-    print("[repack] watchdog feed injected into init")
+    print("[repack] persistent watchdog feed injected into init")
 else:
     print("[repack] init watchdog feed already present or marker missing")
 PYEOF
