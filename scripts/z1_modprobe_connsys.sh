@@ -18,6 +18,11 @@ MODS_DIR="${Z1_MODS_DIR:-/root/connsys}"
 LOG=/tmp/connsys_load.log
 : > "$LOG"
 
+# printk 限速: 缓解 WMT insmod 的 printk 洪流 (loglevel=6 下 info 洪流会饿死 UART RX)
+#   ratelimit=5ms/burst=10 → 重复 printk 每 5ms 最多 10 条, 滚动慢且不卡 shell
+echo 5 > /proc/sys/kernel/printk_ratelimit 2>/dev/null
+echo 10 > /proc/sys/kernel/printk_ratelimit_burst 2>/dev/null
+
 log() { echo "$@" >> "$LOG"; echo "$@"; }
 
 log "[connsys] 模块目录: $MODS_DIR"
