@@ -15,6 +15,9 @@ FW_SRC=${Z1_FW_SRC:-/home/lxj/claude/6572/out/firmware_backup/firmware}
 IW_BIN=${Z1_IW_BIN:-/home/lxj/claude/6572/bridge_backups/products/products_iw_nl80211_20260814_144324/iw_arm_static_stripped}
 # 备选: 老 wifi_tools 产物目录 (iwconfig/iwlist/iwpriv, WEXT 用; 仅当上面 iw 缺失时试 $TOOLS_SRC/iw)
 TOOLS_SRC=${Z1_TOOLS_SRC:-/home/lxj/claude/6572/bridge_backups/products/products_wifi_tools_20260814_131306/bin}
+# ADB (原厂静态 adbd + setup 脚本) — 交互主力 (getty/ACM 不稳时用 adb shell)
+ADBD_BIN=${Z1_ADBD_BIN:-/home/lxj/claude/6572/out/boot_extracted/rd/sbin/adbd}
+ADB_SETUP=/home/lxj/claude/6572/scripts/z1_adb_setup.sh
 SCRIPT=/home/lxj/claude/6572/scripts/z1_modprobe_connsys.sh
 OUT=${Z1_RAMDISK_OUT:-/home/lxj/claude/6572/out/ramdisk_mainline_connsys.gz}
 TMP=$(mktemp -d /tmp/rdkc_XXXXXX)
@@ -149,6 +152,20 @@ if [ -f "$ONBOARD" ]; then
     echo "  脚本 z1_connsys_onboard_test.sh → /root/connsys/"
 else
     echo "WARN: 缺上板验证脚本 $ONBOARD — 需手工推送或用 PC 端跑"
+fi
+
+# 3.4b ADB (原厂静态 adbd + setup 脚本) → /root/connsys/
+#    交互主力: 内核需 CONFIG_USB_CONFIGFS + USB_CONFIGFS_F_FS (ADB 版 zImage)
+#    上板: 开机后 sh /root/connsys/z1_adb_setup.sh → 主机插 USB → adb shell
+if [ -f "$ADBD_BIN" ]; then
+    cp "$ADBD_BIN" "$TMP/rd/root/connsys/adbd"
+    chmod +x "$TMP/rd/root/connsys/adbd"
+    echo "  ADB adbd (原厂静态, FunctionFS) → /root/connsys/adbd"
+fi
+if [ -f "$ADB_SETUP" ]; then
+    cp "$ADB_SETUP" "$TMP/rd/root/connsys/z1_adb_setup.sh"
+    chmod +x "$TMP/rd/root/connsys/z1_adb_setup.sh"
+    echo "  ADB setup 脚本 → /root/connsys/z1_adb_setup.sh"
 fi
 
 # 3.5 塞 CONNSYS 固件 (WMT_init 读 /system/etc/firmware/WMT_SOC.cfg, wlan request_firmware WIFI_RAM_CODE_*)
