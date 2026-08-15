@@ -67,13 +67,20 @@ src = open(path).read()
 
 ttygs0_marker = "# Console on USB ACM (ttyGS0) and on framebuffer (tty0 if present)"
 ttygs0_wait = """# Console on USB ACM (ttyGS0) and on framebuffer (tty0 if present)
-# wait for /dev/ttyGS0 node: gadget probes async, single mdev -s above may run too early
-i=0
-while [ ! -e /dev/ttyGS0 ] && [ $i -lt 25 ]; do
-  $BB mdev -s 2>/dev/null
-  $BB sleep 0.2
-  i=$((i+1))
-done
+# Continuous ttyGS0 getty: USB may be plugged any time after boot.  Loop until
+# the gadget node appears (gadget enumerates on USB plug), then start getty.
+# A fixed 5s wait missed late USB plugs (getty died before node existed).
+(
+  i=0
+  while [ $i -lt 600 ]; do
+    if [ -e /dev/ttyGS0 ]; then
+      exec $BB getty -L -n -l /bin/sh 115200 ttyGS0 vt100
+    fi
+    $BB mdev -s 2>/dev/null
+    $BB sleep 1
+    i=$((i+1))
+  done
+) </dev/null >/dev/null 2>&1 &
 """
 if ttygs0_marker in src and "wait for /dev/ttyGS0" not in src:
     src = src.replace(ttygs0_marker, ttygs0_wait, 1)
