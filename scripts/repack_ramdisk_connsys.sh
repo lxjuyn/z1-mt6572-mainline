@@ -56,6 +56,43 @@ PYEOF
     fi
 fi
 
+# 2.6 getty 修复 (Z1_GETTY_FIX=1 时) — shell 卡死根因修复 R2
+#    /dev/console 交互 shell 内核强制 O_NONBLOCK+noctty → 改 ttyS0 真设备 + CLOCAL
+#    恢复 ttyGS0 等待循环 (gadget 异步 probe 需等节点)
+if [ "${Z1_GETTY_FIX:-0}" = "1" ]; then
+    if python3 - "$TMP/rd/init" <<'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+
+ttygs0_marker = "# Console on USB ACM (ttyGS0) and on framebuffer (tty0 if present)"
+ttygs0_wait = """# Console on USB ACM (ttyGS0) and on framebuffer (tty0 if present)
+# wait for /dev/ttyGS0 node: gadget probes async, single mdev -s above may run too early
+i=0
+while [ ! -e /dev/ttyGS0 ] && [ $i -lt 25 ]; do
+  $BB mdev -s 2>/dev/null
+  $BB sleep 0.2
+  i=$((i+1))
+done
+"""
+if ttygs0_marker in src and "wait for /dev/ttyGS0" not in src:
+    src = src.replace(ttygs0_marker, ttygs0_wait, 1)
+
+src = src.replace("getty -n -l /bin/sh 115200 ttyGS0", "getty -L -n -l /bin/sh 115200 ttyGS0")
+
+old_fb = "exec $BB getty -n -l /bin/sh 0 console vt100 2>/dev/null"
+new_fb = "exec $BB getty -L -n -l /bin/sh 115200 ttyS0 vt100 2>/dev/null"
+if old_fb in src:
+    src = src.replace(old_fb, new_fb, 1)
+
+open(path, 'w').write(src)
+print("[repack] getty R2 fix applied: ttyGS0 wait + getty -L ttyS0")
+PYEOF
+    then
+        :
+    fi
+fi
+
 # 3. 塞 CONNSYS 模块到 /root/connsys
 mkdir -p "$TMP/rd/root/connsys"
 for ko in \
