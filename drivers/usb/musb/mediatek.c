@@ -8,6 +8,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -176,9 +177,10 @@ static irqreturn_t mtk_musb_interrupt(int irq, void *dev_id)
 	irqreturn_t retval = IRQ_NONE;
 	struct musb *musb = (struct musb *)dev_id;
 	u32 l1_ints;
+	u32 l1_intm;
 
-	l1_ints = musb_readl(musb->mregs, USB_L1INTS) &
-			musb_readl(musb->mregs, USB_L1INTM);
+	l1_intm = musb_readl(musb->mregs, USB_L1INTM);
+	l1_ints = musb_readl(musb->mregs, USB_L1INTS) & l1_intm;
 
 	if (l1_ints & (TX_INT_STATUS | RX_INT_STATUS | USBCOM_INT_STATUS))
 		retval = generic_interrupt(irq, musb);
@@ -187,6 +189,13 @@ static irqreturn_t mtk_musb_interrupt(int irq, void *dev_id)
 	if (l1_ints & DMA_INT_STATUS)
 		retval = dma_controller_irq(irq, musb->dma_controller);
 #endif
+
+	/* Debug: log unexpected interrupts (USBCOM includes reset/suspend/resume) */
+	if (l1_ints & USBCOM_INT_STATUS) {
+		u8 devctl = readb(musb->mregs + MUSB_DEVCTL);
+		mtk_musb_dbg("irq: USBCOM l1_ints=0x%x DEVCTL=0x%02x", l1_ints, devctl);
+	}
+
 	return retval;
 }
 
@@ -257,6 +266,9 @@ static int mtk_musb_init(struct musb *musb)
 	struct device *dev = musb->controller;
 	struct mtk_glue *glue = dev_get_drvdata(dev->parent);
 	int ret;
+	int retry;
+
+	mtk_musb_dbg("init: entering, port_mode=%d", musb->port_mode);
 
 	glue->musb = musb;
 	musb->phy = glue->phy;
@@ -269,32 +281,63 @@ static int mtk_musb_init(struct musb *musb)
 	musb_writew(musb->mregs, MUSB_RXTOGEN, MTK_TOGGLE_EN);
 
 	if (musb->port_mode == MUSB_OTG) {
+		mtk_musb_dbg("init: OTG mode, initializing role switch");
 		ret = mtk_otg_switch_init(glue);
-		if (ret)
+		if (ret) {
+			mtk_musb_dbg("init: OTG switch init failed: %d", ret);
 			return ret;
+		}
 	} else if (musb->port_mode == MUSB_PERIPHERAL) {
+		mtk_musb_dbg("init: PERIPHERAL mode, setting PHY to DEVICE");
 		glue->role = USB_ROLE_DEVICE;
 		glue->phy_mode = PHY_MODE_USB_DEVICE;
+	} else if (musb->port_mode == MUSB_HOST) {
+		mtk_musb_dbg("init: HOST mode, setting PHY to HOST");
+		glue->role = USB_ROLE_HOST;
+		glue->phy_mode = PHY_MODE_USB_HOST;
 	}
 
-	ret = phy_init(glue->phy);
-	if (ret)
+	/* PHY initialization with retry logic for HS slew-rate calibration */
+	for (retry = 0; retry < MTK_PHY_INIT_RETRIES; retry++) {
+		mtk_musb_dbg("init: phy_init attempt %d/%d", retry + 1, MTK_PHY_INIT_RETRIES);
+		ret = phy_init(glue->phy);
+		if (ret == 0) {
+			mtk_musb_dbg("init: phy_init succeeded on attempt %d", retry + 1);
+			break;
+		}
+		mtk_musb_dbg("init: phy_init failed (attempt %d): %d", retry + 1, ret);
+		if (retry < MTK_PHY_INIT_RETRIES - 1) {
+			msleep(MTK_PHY_INIT_DELAY_MS);
+		}
+	}
+	if (ret) {
+		mtk_musb_dbg("init: phy_init failed after %d attempts", MTK_PHY_INIT_RETRIES);
 		goto err_phy_init;
+	}
 
+	mtk_musb_dbg("init: phy_power_on");
 	ret = phy_power_on(glue->phy);
-	if (ret)
+	if (ret) {
+		mtk_musb_dbg("init: phy_power_on failed: %d", ret);
 		goto err_phy_power_on;
+	}
 
+	mtk_musb_dbg("init: phy_set_mode to %d", glue->phy_mode);
 	ret = phy_set_mode(glue->phy, glue->phy_mode);
-	if (ret)
+	if (ret) {
+		mtk_musb_dbg("init: phy_set_mode failed: %d", ret);
 		goto err_phy_set_mode;
+	}
 
+	mtk_musb_dbg("init: enabling interrupts (L1INTM)");
 #if defined(CONFIG_USB_INVENTRA_DMA)
 	musb_writel(musb->mregs, MUSB_HSDMA_INTR,
 		    DMA_INTR_STATUS_MSK | DMA_INTR_UNMASK_SET_MSK);
 #endif
 	musb_writel(musb->mregs, USB_L1INTM, TX_INT_STATUS | RX_INT_STATUS |
 		    USBCOM_INT_STATUS | DMA_INT_STATUS);
+
+	mtk_musb_dbg("init: completed successfully");
 	return 0;
 
 err_phy_set_mode:
@@ -343,14 +386,24 @@ static int mtk_musb_exit(struct musb *musb)
 	struct device *dev = musb->controller;
 	struct mtk_glue *glue = dev_get_drvdata(dev->parent);
 
+	mtk_musb_dbg("exit: shutting down MUSB controller");
+
 	if (musb->port_mode == MUSB_OTG)
 		mtk_otg_switch_exit(glue);
+
+	mtk_musb_dbg("exit: powering off PHY");
 	phy_power_off(glue->phy);
+
+	mtk_musb_dbg("exit: exiting PHY");
 	phy_exit(glue->phy);
+
+	mtk_musb_dbg("exit: disabling clocks");
 	clk_bulk_disable_unprepare(MTK_MUSB_CLKS_NUM, glue->clks);
 
 	pm_runtime_put_sync(dev);
 	pm_runtime_disable(dev);
+
+	mtk_musb_dbg("exit: completed");
 	return 0;
 }
 
@@ -414,6 +467,8 @@ static int mtk_musb_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	int ret;
 
+	mtk_musb_dbg("probe: entering for %s", dev_name(dev));
+
 	glue = devm_kzalloc(dev, sizeof(*glue), GFP_KERNEL);
 	if (!glue)
 		return -ENOMEM;
@@ -423,66 +478,92 @@ static int mtk_musb_probe(struct platform_device *pdev)
 	if (!pdata)
 		return -ENOMEM;
 
+	mtk_musb_dbg("probe: calling of_platform_populate");
 	ret = of_platform_populate(np, NULL, NULL, dev);
 	if (ret)
 		return dev_err_probe(dev, ret,
 				"failed to create child devices at %p\n", np);
 
+	mtk_musb_dbg("probe: getting clocks");
 	ret = mtk_musb_clks_get(glue);
-	if (ret)
+	if (ret) {
+		mtk_musb_dbg("probe: clks_get failed: %d", ret);
 		return ret;
+	}
 
 	pdata->config = &mtk_musb_hdrc_config;
 	pdata->platform_ops = &mtk_musb_ops;
 	pdata->mode = usb_get_dr_mode(dev);
 
-	if (IS_ENABLED(CONFIG_USB_MUSB_HOST))
+	mtk_musb_dbg("probe: DT dr_mode=%d, checking kernel config overrides", pdata->mode);
+
+	if (IS_ENABLED(CONFIG_USB_MUSB_HOST)) {
 		pdata->mode = USB_DR_MODE_HOST;
-	else if (IS_ENABLED(CONFIG_USB_MUSB_GADGET))
+		mtk_musb_dbg("probe: forcing HOST mode (CONFIG_USB_MUSB_HOST)");
+	} else if (IS_ENABLED(CONFIG_USB_MUSB_GADGET)) {
 		pdata->mode = USB_DR_MODE_PERIPHERAL;
+		mtk_musb_dbg("probe: forcing PERIPHERAL mode (CONFIG_USB_MUSB_GADGET)");
+	}
 
 	switch (pdata->mode) {
 	case USB_DR_MODE_HOST:
 		glue->phy_mode = PHY_MODE_USB_HOST;
 		glue->role = USB_ROLE_HOST;
+		mtk_musb_dbg("probe: configured for HOST mode");
 		break;
 	case USB_DR_MODE_PERIPHERAL:
 		glue->phy_mode = PHY_MODE_USB_DEVICE;
 		glue->role = USB_ROLE_DEVICE;
+		mtk_musb_dbg("probe: configured for PERIPHERAL mode");
 		break;
 	case USB_DR_MODE_OTG:
 		glue->phy_mode = PHY_MODE_USB_OTG;
 		glue->role = USB_ROLE_NONE;
+		mtk_musb_dbg("probe: configured for OTG mode");
 		break;
 	default:
 		return dev_err_probe(&pdev->dev, -EINVAL,
 				"Error 'dr_mode' property\n");
 	}
 
+	mtk_musb_dbg("probe: getting PHY from DT");
 	glue->phy = devm_of_phy_get_by_index(dev, np, 0);
-	if (IS_ERR(glue->phy))
-		return dev_err_probe(dev, PTR_ERR(glue->phy),
-				"fail to getting phy\n");
+	if (IS_ERR(glue->phy)) {
+		ret = PTR_ERR(glue->phy);
+		mtk_musb_dbg("probe: PHY get failed: %d", ret);
+		return dev_err_probe(dev, ret, "fail to getting phy\n");
+	}
+	mtk_musb_dbg("probe: PHY acquired successfully");
 
+	mtk_musb_dbg("probe: registering generic USB PHY");
 	glue->usb_phy = usb_phy_generic_register();
-	if (IS_ERR(glue->usb_phy))
-		return dev_err_probe(dev, PTR_ERR(glue->usb_phy),
-				"fail to registering usb-phy\n");
+	if (IS_ERR(glue->usb_phy)) {
+		ret = PTR_ERR(glue->usb_phy);
+		mtk_musb_dbg("probe: usb_phy_generic_register failed: %d", ret);
+		return dev_err_probe(dev, ret, "fail to registering usb-phy\n");
+	}
 
+	mtk_musb_dbg("probe: getting xceiv");
 	glue->xceiv = devm_usb_get_phy(dev, USB_PHY_TYPE_USB2);
 	if (IS_ERR(glue->xceiv)) {
 		ret = PTR_ERR(glue->xceiv);
+		mtk_musb_dbg("probe: devm_usb_get_phy failed: %d", ret);
 		dev_err(dev, "fail to getting usb-phy %d\n", ret);
 		goto err_unregister_usb_phy;
 	}
+	mtk_musb_dbg("probe: xceiv acquired successfully");
 
 	platform_set_drvdata(pdev, glue);
 	pm_runtime_enable(dev);
 	pm_runtime_get_sync(dev);
 
+	mtk_musb_dbg("probe: enabling clocks");
 	ret = clk_bulk_prepare_enable(MTK_MUSB_CLKS_NUM, glue->clks);
-	if (ret)
+	if (ret) {
+		mtk_musb_dbg("probe: clk_bulk_prepare_enable failed: %d", ret);
 		goto err_enable_clk;
+	}
+	mtk_musb_dbg("probe: clocks enabled");
 
 	pinfo = mtk_dev_info;
 	pinfo.parent = dev;
@@ -493,13 +574,17 @@ static int mtk_musb_probe(struct platform_device *pdev)
 	pinfo.fwnode = of_fwnode_handle(np);
 	pinfo.of_node_reused = true;
 
+	mtk_musb_dbg("probe: registering musb-hdrc child device");
 	glue->musb_pdev = platform_device_register_full(&pinfo);
 	if (IS_ERR(glue->musb_pdev)) {
 		ret = PTR_ERR(glue->musb_pdev);
+		mtk_musb_dbg("probe: musb-hdrc register failed: %d", ret);
 		dev_err(dev, "failed to register musb device: %d\n", ret);
 		goto err_device_register;
 	}
 
+	mtk_musb_dbg("probe: completed successfully, musb-hdrc pdev=%s",
+		     dev_name(&glue->musb_pdev->dev));
 	return 0;
 
 err_device_register:
