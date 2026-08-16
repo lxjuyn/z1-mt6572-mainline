@@ -13,8 +13,18 @@ GADGET=z1
 
 log() { echo "[adb-setup] $*"; }
 
-# 1. 挂 configfs
-$BB mount -t configfs none /sys/kernel/config 2>/dev/null || log "configfs 已挂载或挂载失败(继续)"
+# 1. 挂 configfs (带验证)
+if [ ! -d /sys/kernel/config ]; then
+  $BB mount -t configfs configfs /sys/kernel/config 2>/dev/null || {
+    log "FATAL: configfs 挂载失败"
+    exit 1
+  }
+fi
+if [ ! -d /sys/kernel/config/usb_gadget ]; then
+  log "FATAL: 内核未开 CONFIG_USB_CONFIGFS 或 configfs 挂载异常"
+  exit 1
+fi
+log "configfs 就绪"
 
 # 2. 清理旧 gadget (若存在)
 if [ -d "$CFG/$GADGET" ]; then
@@ -56,17 +66,56 @@ grep -q "^shell:" /etc/passwd 2>/dev/null || echo "shell:x:2000:2000:shell:/data
 #    mainline f_fs.c: ffs_do_functionfs_bind 在 !desc_ready 返回 -ENODEV;
 #    desc_ready 要 adbd 打开 ep0 写入 ADB 描述符才置位。必须先起 adbd 后 echo UDC,
 #    否则 gadget 不枚举。adbd 硬编码 /dev/usb-ffs/adb, 已在 step6 mount。
+if [ ! -x /root/connsys/adbd ]; then
+  log "FATAL: /root/connsys/adbd 不存在或不可执行"
+  exit 1
+fi
 log "starting adbd (root, ALLOW_ADBD_ROOT)..."
 /root/connsys/adbd 2>&1 &
 ADBD_PID=$!
+sleep 1
+if ! kill -0 $ADBD_PID 2>/dev/null; then
+  log "FATAL: adbd 启动失败 (pid $ADBD_PID 已退出)"
+  exit 1
+fi
 log "adbd started pid $ADBD_PID, waiting for desc_ready..."
 
 # 8b. 绑 UDC (带重试, 等 adbd 写好描述符)
+#     UDC 名称 = DTS 设备节点名 (11100000.usb), 不是驱动名 (musb-hdrc)
+UDC_NAME="11100000.usb"
+if [ ! -d /sys/class/udc ]; then
+  log "FATAL: /sys/class/udc 不存在 (内核未开 USB gadget UDC 框架)"
+  exit 1
+fi
+log "可用 UDC: $(ls /sys/class/udc/ 2>/dev/null)"
 i=0
 while [ $i -lt 20 ]; do
-  echo musb-hdrc > "$CFG/$GADGET/UDC" 2>/dev/null && log "UDC 绑定成功" && break
+  # 检查 adbd 是否还活着
+  if ! kill -0 $ADBD_PID 2>/dev/null; then
+    log "adbd 已退出，重启..."
+    /root/connsys/adbd 2>&1 &
+    ADBD_PID=$!
+    sleep 1
+  fi
+  echo "$UDC_NAME" > "$CFG/$GADGET/UDC" 2>/dev/null && log "UDC 绑定成功 ($UDC_NAME)" && break
   i=$((i+1))
   log "UDC 绑定重试 $i/20 (等 adbd desc_ready)..."
   sleep 1
 done
 [ $i -lt 20 ] || log "UDC 绑定失败(检查 adbd 是否写描述符 / /sys/class/udc/)"
+
+# 9. 验证 /dev/ttyGS0 创建
+if [ $i -lt 20 ]; then
+  sleep 2  # 等内核创建设备节点
+  if [ -c /dev/ttyGS0 ]; then
+    log "✅ USB gadget 配置成功: /dev/ttyGS0 就绪"
+    log "   ADB: 主机插 USB 后运行 'adb devices'"
+    log "   串口: cat /dev/ttyGS0"
+  else
+    log "⚠️  UDC 绑定成功但 /dev/ttyGS0 未创建"
+    log "诊断:"
+    log "  ls /sys/class/udc/ → $(ls /sys/class/udc/ 2>/dev/null)"
+    log "  cat $CFG/$GADGET/UDC → $(cat $CFG/$GADGET/UDC 2>/dev/null)"
+    log "  dmesg | tail -20 | grep -i 'udc\|gadget\|acm'"
+  fi
+fi
