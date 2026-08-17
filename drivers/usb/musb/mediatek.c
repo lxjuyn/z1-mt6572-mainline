@@ -27,7 +27,6 @@
 #include <linux/irqflags.h>
 #include <linux/spinlock.h>
 #include <linux/usb/role.h>
-#include <linux/usb/usb_phy_generic.h>
 #include "musb_core.h"
 #include "musb_dma.h"
 
@@ -56,7 +55,6 @@ struct mtk_glue {
 	struct device *dev;
 	struct musb *musb;
 	struct platform_device *musb_pdev;
-	struct platform_device *usb_phy;
 	struct phy *phy;
 	struct usb_phy *xceiv;
 	enum phy_mode phy_mode;
@@ -532,9 +530,11 @@ static int mtk_musb_probe(struct platform_device *pdev)
 	dev_dbg(dev, "probe: getting clocks\n");
 	ret = mtk_musb_clks_get(glue);
 	if (ret) {
-		dev_dbg(dev, "probe: clks_get failed: %d\n", ret);
+		dev_info(dev, "probe: clks_get returned %d (EPROBE_DEFER=%d)\n",
+			 ret, -EPROBE_DEFER);
 		return ret;
 	}
+	dev_info(dev, "probe: clocks acquired\n");
 
 	pdata->config = &mtk_musb_hdrc_config;
 	pdata->platform_ops = &mtk_musb_ops;
@@ -580,20 +580,18 @@ static int mtk_musb_probe(struct platform_device *pdev)
 	}
 	dev_info(dev, "probe: PHY acquired successfully\n");
 
-	dev_dbg(dev, "probe: registering generic USB PHY\n");
-	glue->usb_phy = usb_phy_generic_register();
-	if (IS_ERR(glue->usb_phy)) {
-		ret = PTR_ERR(glue->usb_phy);
-		dev_err(dev, "probe: usb_phy_generic_register failed: %d\n", ret);
-		return dev_err_probe(dev, ret, "fail to registering usb-phy\n");
-	}
-
-	dev_dbg(dev, "probe: getting xceiv\n");
+	/*
+	 * Get the legacy USB PHY (xceiv) registered by phy-mtk-mt6572-usb2-handoff.
+	 * The PHY driver registers with both Generic PHY and legacy USB PHY frameworks,
+	 * so devm_usb_get_phy() returns the real MT6572 PHY (not a NOP transceiver).
+	 * This provides proper VBUS detection and OTG state tracking.
+	 */
+	dev_dbg(dev, "probe: getting xceiv from legacy USB PHY framework\n");
 	glue->xceiv = devm_usb_get_phy(dev, USB_PHY_TYPE_USB2);
 	if (IS_ERR(glue->xceiv)) {
 		ret = PTR_ERR(glue->xceiv);
 		dev_err(dev, "probe: devm_usb_get_phy failed: %d\n", ret);
-		goto err_unregister_usb_phy;
+		return ret;
 	}
 	dev_dbg(dev, "probe: xceiv acquired successfully\n");
 
@@ -636,18 +634,14 @@ err_device_register:
 err_enable_clk:
 	pm_runtime_put_sync(dev);
 	pm_runtime_disable(dev);
-err_unregister_usb_phy:
-	usb_phy_generic_unregister(glue->usb_phy);
 	return ret;
 }
 
 static void mtk_musb_remove(struct platform_device *pdev)
 {
 	struct mtk_glue *glue = platform_get_drvdata(pdev);
-	struct platform_device *usb_phy = glue->usb_phy;
 
 	platform_device_unregister(glue->musb_pdev);
-	usb_phy_generic_unregister(usb_phy);
 }
 
 #ifdef CONFIG_OF

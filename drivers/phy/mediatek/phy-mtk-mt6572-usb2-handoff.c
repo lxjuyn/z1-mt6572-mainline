@@ -26,6 +26,8 @@
 #include <linux/of.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
+#include <linux/usb/otg.h>
+#include <linux/usb/phy.h>
 
 /* Default slew-rate value when calibration fails (derived from USB 2.0 spec) */
 #define MT6572_DEFAULT_SLEW_RATE	6
@@ -51,6 +53,10 @@ struct mt6572_usb2_phy {
 	bool powered;
 	bool slew_cal_valid;
 	u8 slew_cal_value;
+	/* Legacy USB PHY framework registration (for MUSB xceiv) */
+	struct usb_phy usb_phy;
+	struct usb_otg otg;
+	struct phy *phy;	/* Generic PHY reference for usb_phy wrappers */
 };
 
 static void mt6572_usb2_update_bits(struct mt6572_usb2_phy *priv,
@@ -326,12 +332,34 @@ static const struct phy_ops mt6572_usb2_phy_ops = {
 	.owner		= THIS_MODULE,
 };
 
+/*
+ * Legacy USB PHY framework wrappers.
+ * The MUSB glue layer uses devm_usb_get_phy() to obtain a usb_phy pointer
+ * for OTG state tracking (musb->xceiv->otg->state). By registering with
+ * the legacy framework, MUSB gets a real MT6572 PHY instead of a NOP
+ * transceiver that lacks VBUS detection.
+ */
+static int mt6572_usb_phy_init(struct usb_phy *phy)
+{
+	struct mt6572_usb2_phy *priv = container_of(phy, struct mt6572_usb2_phy, usb_phy);
+
+	return phy_power_on(priv->phy);
+}
+
+static void mt6572_usb_phy_shutdown(struct usb_phy *phy)
+{
+	struct mt6572_usb2_phy *priv = container_of(phy, struct mt6572_usb2_phy, usb_phy);
+
+	phy_power_off(priv->phy);
+}
+
 static int mt6572_usb2_phy_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct mt6572_usb2_phy *priv;
 	struct phy *phy;
 	struct phy_provider *provider;
+	int ret;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
@@ -350,8 +378,35 @@ static int mt6572_usb2_phy_probe(struct platform_device *pdev)
 
 	phy_set_drvdata(phy, priv);
 	provider = devm_of_phy_provider_register(dev, of_phy_simple_xlate);
+	if (IS_ERR(provider))
+		return PTR_ERR(provider);
 
-	return PTR_ERR_OR_ZERO(provider);
+	/*
+	 * Register with the legacy USB PHY framework so that
+	 * devm_usb_get_phy(dev, USB_PHY_TYPE_USB2) from the MUSB
+	 * glue layer finds this real MT6572 PHY (not a NOP transceiver).
+	 *
+	 * The MUSB controller needs usb_phy->otg for OTG state tracking
+	 * and usb_phy->init/shutdown for PHY power sequencing.
+	 */
+	priv->phy = phy;	/* store Generic PHY ref for wrapper callbacks */
+	priv->usb_phy.dev = dev;
+	priv->usb_phy.init = mt6572_usb_phy_init;
+	priv->usb_phy.shutdown = mt6572_usb_phy_shutdown;
+	priv->usb_phy.type = USB_PHY_TYPE_USB2;
+	priv->otg.usb_phy = &priv->usb_phy;
+	priv->otg.state = OTG_STATE_B_IDLE;
+	priv->usb_phy.otg = &priv->otg;
+
+	ret = usb_add_phy_dev(&priv->usb_phy);
+	if (ret) {
+		dev_err(dev, "failed to register legacy USB PHY: %d\n", ret);
+		return ret;
+	}
+
+	dev_info(dev, "MT6572 USB2 PHY registered (Generic + legacy)\n");
+
+	return 0;
 }
 
 static const struct of_device_id mt6572_usb2_phy_of_match[] = {
