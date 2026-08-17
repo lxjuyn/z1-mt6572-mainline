@@ -119,11 +119,15 @@
 		};
 	};
 
-	univpll: univpll {
-		compatible = "fixed-clock";
-		clock-frequency = <1248000000>;
-		#clock-cells = <0>;
-	};
+	/*
+	 * univpll fixed-clock REMOVED (2026-08-17): this placeholder caused
+	 * apmixedsys probe to return -EEXIST because the PLL driver registers
+	 * a clock with the same name "univpll".  The real 1248 MHz univpll is
+	 * now provided by the apmixedsys PLL driver (CLK_APMIXED_UNIVPLL).
+	 * Topckgen factor clocks that reference "univpll" as their parent
+	 * (upll_d*, univ_48m) are placed on the orphan list during topckgen
+	 * probe and automatically reparented once apmixedsys registers.
+	 */
 
 	uart_clk: dummy26m {
 		compatible = "fixed-clock";
