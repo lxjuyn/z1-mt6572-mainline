@@ -39,7 +39,7 @@
 		 * so the end must match or the initrd is truncated.
 		 */
 		linux,initrd-start = <0x84100000>;
-		linux,initrd-end = <0x841e27f0>;
+		linux,initrd-end = <0x841e2810>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
@@ -278,6 +278,25 @@
 		monitored-battery = <&battery>;
 		status = "okay";
 	};
+
+	/*
+	 * Z1 USB VBUS supply (fixed regulator).
+	 * Z1 operates exclusively as a USB device (CDC-ACM gadget). The USB PHY
+	 * requires a VBUS supply to detect host connection and enter device mode.
+	 * Without this, the PHY probe succeeds but UDC registration fails silently
+	 * because the VBUS comparator never signals "device ready" to the MUSB core.
+	 *
+	 * This is a fixed regulator marked always-on because Z1 has no physical
+	 * VBUS switch — the USB connector is wired directly to the PHY, and VBUS
+	 * is always present when connected to a host.
+	 */
+	usb_vbus: regulator-usb-vbus {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-vbus";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-always-on;
+	};
 };
 
 &uart0 {
@@ -287,10 +306,30 @@
 &usb {
 	status = "okay";
 	dr_mode = "peripheral";  /* Z1 only acts as USB device (CDC-ACM gadget); never host */
+	/*
+	 * USB peripheral mode requires proper PHY initialization.
+	 * The mt6572-usb2-phy driver performs HS slew-rate calibration
+	 * which may timeout but continues with default values.
+	 *
+	 * VBUS supply: Z1 has no physical VBUS regulator; VBUS is provided
+	 * by the USB host (PC). The PHY driver forces VBUS comparator on
+	 * via software (reg 0x1a bit4). Adding explicit vbus-supply ensures
+	 * the MUSB glue doesn't defer probe waiting for a regulator.
+	 * If regulator framework can't find this supply, it auto-provides
+	 * a dummy regulator that always returns success.
+	 */
+	phys = <&u2phy0>;
+	phy-names = "usb2";
+	vbus-supply = <&mt6323_vusb_reg>;
 };
 
 &u2phy0 {
 	status = "okay";
+	/*
+	 * PHY probe happens early (0.097s in logs). The driver handles
+	 * HS slew-rate calibration timeout gracefully with fallback values.
+	 * No additional properties needed - reg and #phy-cells from base dtsi.
+	 */
 };
 
 /*
