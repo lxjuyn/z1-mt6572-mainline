@@ -585,11 +585,22 @@ static int mtk_musb_probe(struct platform_device *pdev)
 	 * The PHY driver registers with both Generic PHY and legacy USB PHY frameworks,
 	 * so devm_usb_get_phy() returns the real MT6572 PHY (not a NOP transceiver).
 	 * This provides proper VBUS detection and OTG state tracking.
+	 *
+	 * KEY FIX: devm_usb_get_phy() returns -ENODEV (not -EPROBE_DEFER) when the
+	 * PHY hasn't been registered yet. This happens when the PHY driver probes
+	 * after us (both are subsys_initcall, ordering depends on link order).
+	 * Convert -ENODEV to -EPROBE_DEFER so the platform bus retries later.
+	 * Without this, a race condition causes permanent probe failure.
 	 */
 	dev_dbg(dev, "probe: getting xceiv from legacy USB PHY framework\n");
 	glue->xceiv = devm_usb_get_phy(dev, USB_PHY_TYPE_USB2);
 	if (IS_ERR(glue->xceiv)) {
 		ret = PTR_ERR(glue->xceiv);
+		if (ret == -ENODEV) {
+			dev_info(dev, "probe: legacy USB PHY not yet registered, deferring (retry later)\n");
+			return dev_err_probe(dev, -EPROBE_DEFER,
+					     "USB PHY not yet available\n");
+		}
 		dev_err(dev, "probe: devm_usb_get_phy failed: %d\n", ret);
 		return ret;
 	}
