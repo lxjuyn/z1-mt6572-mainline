@@ -530,8 +530,8 @@ char * __init unpack_to_rootfs(char *buf, unsigned long len)
 	 */
 	if (len > 512 && buf[0] == 0x88 && buf[1] == 0x16 &&
 	    buf[2] == 0x88 && buf[3] == 0x58 &&
-	    buf[0x0c] == 'R' && buf[0x0d] == 'O' &&
-	    buf[0x0e] == 'O' && buf[0x0f] == 'T') {
+	    buf[0x08] == 'R' && buf[0x09] == 'O' &&
+	    buf[0x0a] == 'O' && buf[0x0b] == 'T') {
 		pr_info("initramfs: detected MTK ROOTFS header, skipping 512 bytes\n");
 		buf  += 512;
 		len  -= 512;
