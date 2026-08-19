@@ -522,9 +522,24 @@ char * __init unpack_to_rootfs(char *buf, unsigned long len)
 	if (!bufs)
 		panic_show_mem("can't allocate buffers");
 
-	header_buf = bufs->header;
-	symlink_buf = bufs->symlink;
-	name_buf = bufs->name;
+	/*
+	 * MTK ROOTFS blob header detection:
+	 * MediaTek bootloaders store the ramdisk with a 512-byte header
+	 * that begins with magic 0x88168858 followed by ASCII "ROOTFS".
+	 * Strip it so the kernel sees the raw gzip-cpio payload underneath.
+	 */
+	if (len > 512 && buf[0] == 0x88 && buf[1] == 0x16 &&
+	    buf[2] == 0x88 && buf[3] == 0x58 &&
+	    buf[0x0c] == 'R' && buf[0x0d] == 'O' &&
+	    buf[0x0e] == 'O' && buf[0x0f] == 'T') {
+		pr_info("initramfs: detected MTK ROOTFS header, skipping 512 bytes\n");
+		buf  += 512;
+		len  -= 512;
+	}
+
+	header_buf   = bufs->header;
+	symlink_buf  = bufs->symlink;
+	name_buf     = bufs->name;
 
 	state = Start;
 	this_header = 0;
