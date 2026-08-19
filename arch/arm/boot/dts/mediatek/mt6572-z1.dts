@@ -28,7 +28,7 @@
 		 * Z1 diagnostic: do not instantiate an early console from DT.
 		 * The normal 8250 console remains selected by the boot header.
 		 */
-		bootargs = "console=tty0 console=ttyMT0,921600n8 root=/dev/ram panic=10 loglevel=8 clk_ignore_unused regulator_ignore_unused oops=panic sysrq_always_enabled rdinit=/init earlycon=mtk8250,0x11005000";
+		bootargs = "console=tty0 console=ttyMT0,921600n8 root=/dev/ram panic=10 loglevel=7 clk_ignore_unused regulator_ignore_unused oops=panic sysrq_always_enabled rdinit=/init earlycon=mtk8250,0x11005000";
 		/*
 		 * Z1 LK relocates the MTK ROOTFS payload to 0x84100000.  Its
 		 * ATAG_INITRD2 handoff is not present at runtime, so provide the

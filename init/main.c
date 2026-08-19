@@ -822,7 +822,7 @@ void __init __weak pgtable_cache_init(void) { }
 void __init __weak trap_init(void) { }
 
 /* Z1 diagnostic: force initcall boundaries despite LK cmdline replacement. */
-bool initcall_debug = true;
+bool initcall_debug = false;
 core_param(initcall_debug, initcall_debug, bool, 0644);
 
 #ifdef TRACEPOINTS_ENABLED
