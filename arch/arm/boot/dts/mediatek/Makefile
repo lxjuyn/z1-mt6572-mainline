@@ -5,6 +5,7 @@ dtb-$(CONFIG_ARCH_MEDIATEK) += \
 	mt6572-jty-d101.dtb \
 	mt6572-lenovo-a369i.dtb \
 	mt6572-prestigio-pap5500-duo.dtb \
+	mt6572-s6.dtb \
 	mt6572-z1.dtb \
 	mt6580-evbp1.dtb \
 	mt6582-alcatel-yarisxl.dtb \

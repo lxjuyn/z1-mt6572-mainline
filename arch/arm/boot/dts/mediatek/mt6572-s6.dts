@@ -1,0 +1,442 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * S6 smartphone (vendor model "alps I3", device codename s6)
+ * Based on mt6572-z1.dts (Z1 hearing-aid bring-up), which is based on
+ * mt6572-jty-d101.dts by Max Shevchenko.
+ * Same MTK preloader/LK generation as Z1; BOOTIMG partition is 6 MB at
+ * scatter address 0x2980000.
+ *
+ * Minimal bring-up S6 dts: eMMC (mmc0) + UART + USB only.
+ *
+ * Display: S6 LCD is an MCU parallel panel (gc9307 / nv3029s / st7789v),
+ * NOT DSI. Mainline has no MCU-panel driver, so display relies on the
+ * simple-framebuffer handed over by LK (chosen/framebuffer0 below), same
+ * approach as Z1. No DSI panel node here.
+ *
+ * Touch: Focaltech FTS I2C (not Goodix). Intentionally left out / disabled
+ * on first boot until the FTS driver node is added after bus probing.
+ * Camera SP2519_YUV sensor ignored for now.
+ */
+
+/dts-v1/;
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include "mt6572.dtsi"
+#include "mt6323.dtsi"
+
+/ {
+	model = "S6 smartphone (alps I3)";
+	compatible = "alps,s6", "mediatek,mt6572";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+		/*
+		 * Do not instantiate an early console from DT.
+		 * The normal 8250 console remains selected by the boot header.
+		 */
+		bootargs = "console=tty0 console=ttyMT0,921600n8 root=/dev/ram panic=10 loglevel=7 clk_ignore_unused regulator_ignore_unused oops=panic sysrq_always_enabled rdinit=/init earlycon=mtk8250,0x11005000";
+		/*
+		 * Same MTK preloader/LK handoff as Z1: LK relocates the MTK
+		 * ROOTFS payload to 0x84100000 and its ATAG_INITRD2 handoff is
+		 * not present at runtime, so provide the measured range
+		 * explicitly for the packaged logger ramdisk (same ramdisk
+		 * payload reused from Z1; end must match its length or the
+		 * initrd is truncated).
+		 */
+		linux,initrd-start = <0x84100000>;
+		linux,initrd-end = <0x841e2810>;
+
+		/*
+		 * S6: resolution/base TBC on first boot -- these are the Z1
+		 * values (LK leaves OVL layer 2 scanning a 240x320 RGB565
+		 * surface at 0xbfd00000). S6's MCU parallel panel may make LK
+		 * compose a different layout, so verify width/height/stride
+		 * and the physical base against the first real S6 boot log
+		 * before trusting this surface.
+		 */
+		framebuffer0: framebuffer@bfd00000 {
+			compatible = "simple-framebuffer";
+			reg = <0xbfd00000 0x28000>;
+			width = <240>;
+			height = <320>;
+			stride = <512>;
+			format = "r5g6b5";
+		};
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 0x40000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/*
+		 * CONN (WiFi/BT) carveout relocated up to 0xbe000000 so it does
+		 * not shadow the low-RAM region LK/preloader uses during early
+		 * boot (same workaround as Z1).  Kept as 1 MiB no-map.  If the
+		 * CONN MCU misbehaves, revert this carveout AND connsys_pwr
+		 * reg[1] together.
+		 */
+		connsys@be000000 {
+			reg = <0xbe000000 0x100000>;
+			no-map;
+		};
+
+		framebuffer_reserved: framebuffer@bf400000 {
+			reg = <0xbf400000 0xc00000>;
+			no-map;
+		};
+
+		default-pool {
+			compatible = "shared-dma-pool";
+			size = <0x6000000>;
+			alloc-ranges = <0x90000000 0x10000000>;
+			reusable;
+			linux,cma-default;
+		};
+	};
+
+	/*
+	 * CONN (WiFi/BT) subsystem consumer binding the in-tree driver
+	 * drivers/soc/mediatek/mtk6572-connsys.c. Kept status="disabled"
+	 * (connsys disabled state) until board bring-up is gated-tested;
+	 * keep the 1 MiB reserved-memory carveout above mapped when enabling.
+	 */
+	connsys_pwr: connsys@18070000 {
+		compatible = "mediatek,mt6572-connsys";
+		reg = <0x18070000 0x1000>,
+		      <0xbe080000 0x55c00>;	/* CONN MCU config + shared EMI */
+		power-domains = <&spm MT6572_POWER_DOMAIN_CONN>;
+		vcn18-supply = <&mt6323_vcn18_reg>;
+		vcn28-supply = <&mt6323_vcn28_reg>;
+		vcn33_bt-supply = <&mt6323_vcn33_bt_reg>;
+		vcn33_wifi-supply = <&mt6323_vcn33_wifi_reg>;
+		status = "disabled";
+	};
+
+	/*
+	 * CONNSYS out-of-tree stack DT nodes (mt6572-connsys-modules, forward
+	 * port of the vendor conn_soc family), same as Z1:
+	 *   btif@1100e000      -> mtk_btif_drv.ko  ("mediatek,btif")
+	 *   connectivity@18070000 -> mtk_stp_wmt_soc.ko / mtk_wmt_wifi_soc.ko
+	 *                        ("mediatek,mt6572-consys")
+	 *   wifi@180f0000      -> wlan_gen2.ko     ("mediatek,wifi")
+	 *
+	 * IRQ numbers are the vendor MT6572 GIC SPI IDs: BTIF=52,
+	 * APDMA-BTIF-TX=41, APDMA-BTIF-RX=42, CONN2AP/BTIF-wakeup=122,
+	 * WF_HIF=123, CONN_WDT=124.
+	 *
+	 * The old in-tree connsys_pwr node above stays disabled: it must not
+	 * double-power the CONN domain / regulators with this stack.
+	 */
+	btif: btif@1100e000 {
+		compatible = "mediatek,btif";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		/*
+		 * ranges needed: btif_rx/btif_tx child nodes are of_iomap'd by
+		 * the vendor driver. Empty ranges = 1:1 translation.
+		 */
+		ranges;
+		reg = <0x1100e000 0x1000>,
+		      <0x11000380 0x80>,
+		      <0x11000400 0x80>;
+		interrupts = <GIC_SPI 52 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&topckgen CLK_TOP_BTIF>,
+			 <&topckgen CLK_TOP_APDMA>;
+		clock-names = "btifc", "apdmac";
+
+		btif_tx: btif_tx@11000380 {
+			compatible = "mediatek,btif_tx";
+			reg = <0x11000380 0x80>;
+			interrupts = <GIC_SPI 41 IRQ_TYPE_LEVEL_LOW>;
+		};
+
+		btif_rx: btif_rx@11000400 {
+			compatible = "mediatek,btif_rx";
+			reg = <0x11000400 0x80>;
+			interrupts = <GIC_SPI 42 IRQ_TYPE_LEVEL_LOW>;
+		};
+	};
+
+	connectivity: connectivity@18070000 {
+		compatible = "mediatek,mt6572-consys";
+		/*
+		 * reg[0] = CONN MCU config (chip ID poll @ +0x8, expects 0x6572).
+		 * reg[1] = TOPCKGEN block base: the driver pokes AP2CONN_OSC_EN
+		 * at base+0x1800 (phys 0x10001800).
+		 */
+		reg = <0x18070000 0x1000>,
+		      <0x10000000 0x2000>;
+		interrupts = <GIC_SPI 122 IRQ_TYPE_LEVEL_LOW>,	/* CONN2AP / BTIF wakeup */
+			     <GIC_SPI 124 IRQ_TYPE_LEVEL_LOW>;	/* CONN WDT */
+		mediatek,pwrap-regmap = <&pwrap>;
+		power-domains = <&spm MT6572_POWER_DOMAIN_CONN>;
+		resets = <&watchdog MT6572_TOPRGU_CONNSYS_SW_RST>;
+		reset-names = "connsys";
+		vcn18-supply = <&mt6323_vcn18_reg>;
+		vcn28-supply = <&mt6323_vcn28_reg>;
+		vcn33_bt-supply = <&mt6323_vcn33_bt_reg>;
+		vcn33_wifi-supply = <&mt6323_vcn33_wifi_reg>;
+	};
+
+	wifi: wifi@180f0000 {
+		compatible = "mediatek,wifi";
+		reg = <0x180f0000 0x1000>;
+		interrupts = <GIC_SPI 123 IRQ_TYPE_LEVEL_LOW>;
+	};
+
+	/*
+	 * Audio front-end (AFE), physical base 0x11140000 (MT6572 audsys).
+	 * Binds sound/soc/mediatek/mt6572/mt6572-afe-pcm.c. Same state as Z1:
+	 * IRQ is an unverified placeholder until confirmed for this board.
+	 */
+	audsys: audio@11140000 {
+		compatible = "mediatek,mt6572-audio";
+		reg = <0x11140000 0x600>;
+		clocks = <&topckgen CLK_TOP_AUDIO>,
+			 <&topckgen CLK_TOP_AUDIO_INTBUS_SEL>;
+		clock-names = "audio", "audio_intbus_sel";
+		interrupts = <GIC_SPI 0 IRQ_TYPE_LEVEL_HIGH>; /* TODO: real MT6572 ASYS/AFE IRQ */
+		status = "okay";
+	};
+
+	/*
+	 * Machine sound card (mt6572-machine.c) wiring AFE to the MT6323 PMIC
+	 * codec. Requires CONFIG_SND_SOC_MT6572 + codec module and lifted
+	 * pwrap write-deny before it can actually probe; parses cleanly
+	 * meanwhile.
+	 */
+	sound: sound {
+		compatible = "mediatek,mt6572-sound";
+		mediatek,platform = <&audsys>;
+		mediatek,audio-codec = <&codec>;
+		status = "okay";
+	};
+
+	/*
+	 * Battery monitoring: static pack characteristics + ADC-backed meter.
+	 * Values are the generic Li-ion placeholder carried over from Z1 --
+	 * TBC against the real S6 battery on first physical measurement.
+	 * adc_battery stays dependent on CONFIG_POWER_SUPPLY /
+	 * GENERIC_ADC_BATTERY / MEDIATEK_MT6323_AUXADC like Z1.
+	 */
+	battery: battery {
+		compatible = "simple-battery";
+		charge-full-design-microamp-hours = <2000000>; /* TBC: S6 pack */
+		voltage-max-design-microvolt = <4200000>;
+		voltage-min-design-microvolt = <3300000>;
+		status = "okay";
+	};
+
+	adc_battery: adc-battery {
+		compatible = "adc-battery";
+		io-channels = <&mt6323_adc MT6323_AUXADC_BATSNS>,
+			      <&mt6323_adc MT6323_AUXADC_BAT_TEMP>;
+		io-channel-names = "voltage", "temperature";
+		monitored-battery = <&battery>;
+		status = "okay";
+	};
+
+	/*
+	 * USB VBUS supply (fixed regulator, always-on). S6 operates as a USB
+	 * device (gadget) like Z1; the PHY needs a VBUS supply reference so
+	 * the MUSB glue does not defer probe waiting for a regulator.
+	 */
+	usb_vbus: regulator-usb-vbus {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-vbus";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-always-on;
+	};
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&usb {
+	status = "okay";
+	dr_mode = "peripheral";  /* S6 acts as USB device (gadget); never host */
+	/*
+	 * Same reasoning as Z1: explicit vbus-supply keeps the MUSB glue from
+	 * deferring probe; the PHY driver forces the VBUS comparator on via
+	 * software. HS slew-rate calibration may timeout and fall back.
+	 */
+	phys = <&u2phy0>;
+	phy-names = "usb2";
+	vbus-supply = <&mt6323_vusb_reg>;
+};
+
+&u2phy0 {
+	status = "okay";
+	/* reg and #phy-cells come from the base dtsi; nothing extra needed. */
+};
+
+/*
+ * PMIC subsystem bring-up (post eMMC): MT6323 MFD exposes power key, RTC
+ * and regulators. LK already leaves VEMC/VIO18 powered. PMIC_EINT is GPIO7
+ * (same wiring assumption as Z1; TBC on S6 schematic).
+ */
+&pmic {
+	pinctrl-0 = <&pmic_int_pins>;
+	pinctrl-names = "default";
+	interrupts-extended = <&pio 7 IRQ_TYPE_LEVEL_HIGH>;
+	status = "okay";
+};
+
+&mt6323regulator {
+	status = "okay";
+};
+
+/*
+ * Zero-consumer regulator traps (same as Z1): without always-on, regulator
+ * late-cleanup powers vemc/vmc/vmch/vusb off ~39.5s into boot and the board
+ * resets in a preloader reboot loop. Keep all four held up.
+ */
+&mt6323_vemc3v3_reg {
+	regulator-always-on;
+};
+
+&mt6323_vmc_reg {
+	regulator-always-on;
+};
+
+&mt6323_vmch_reg {
+	regulator-always-on;
+};
+
+&mt6323_vusb_reg {
+	regulator-always-on;
+};
+
+/*
+ * PMIC keys. The power key (KEY_POWER) is S6's only physical button and
+ * stays enabled. Disable the PMIC "home" key (KEY_VOLUMEDOWN): there is
+ * no PMIC home key on this device, and volume-down will be reported by
+ * the Focaltech touchscreen virtual keys once those are enabled.
+ */
+&mt6323keys {
+	power-off-time-sec = <5>;
+	home {
+		status = "disabled";
+	};
+};
+
+&pwrap {
+	assigned-clocks = <&topckgen CLK_TOP_PMIC_SPI_SEL>;
+	assigned-clock-parents = <&uart_clk>;
+};
+
+&mmc0 {
+	compatible = "mediatek,mt6572-mmc",
+		     "mediatek,mt7623-mmc",
+		     "mediatek,mt2701-mmc";
+	pinctrl-0 = <&mmc0_pins>;
+	pinctrl-names = "default";
+	bus-width = <1>;
+	max-frequency = <50000000>;
+	no-sd;
+	no-sdio;
+	non-removable;
+	status = "okay";
+};
+
+&pio {
+	pmic_int_pins: pmic-int-pins {
+		pins {
+			pinmux = <MT6572_PIN_7_PMIC_EINT__FUNC_PMIC_EINT>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	pwrap_pins: pwrap-pins {
+		pins {
+			pinmux = <MT6572_PIN_8_PMIC_SPI_CSN__FUNC_PMIC_SPI_CSN>,
+				 <MT6572_PIN_9_PMIC_SPI_SCK__FUNC_PMIC_SPI_SCK>,
+				 <MT6572_PIN_10_PMIC_SPI_MOSI__FUNC_PMIC_SPI_MOSI>,
+				 <MT6572_PIN_11_PMIC_SPI_MISO__FUNC_PMIC_SPI_MISO>;
+		};
+	};
+
+	i2c1_pins: i2c1-pins {
+		pins {
+			pinmux = <MT6572_PIN_113_SCL_1_0__FUNC_SCL_1_0>,
+				 <MT6572_PIN_114_SDA_1_0__FUNC_SDA_1_0>;
+		};
+	};
+
+	/* Pin mux/pads copied from the Z1-validated eMMC setup (6 mA drive);
+	 * TBC against S6 schematic, but same MT6572 eMMC controller wiring
+	 * is expected on this platform. */
+	mmc0_pins: mmc0-pins {
+
+		pins-clk {
+			pinmux = <MT6572_PIN_44_MC0_CK__FUNC_MC0_CK>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+			drive-strength = <6>;
+		};
+
+		pins-cmd-dat {
+			pinmux = <MT6572_PIN_45_MC0_CMD__FUNC_MC0_CMD>,
+				 <MT6572_PIN_46_MC0_DAT0__FUNC_MC0_DAT0>;
+			input-enable;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
+			drive-strength = <6>;
+		};
+
+		/* Keep eMMC RST_n deasserted. Pin 54 is PULLSEL-type on
+		 * MT6572 (not R1R0), so use plain bias-pull-up. */
+		pins-rst {
+			pinmux = <MT6572_PIN_54_MC0_RSTB__FUNC_MC0_RSTB>;
+			bias-pull-up;
+		};
+	};
+};
+
+/*
+ * S6 buttons -- actual layout (no matrix keypad on this board):
+ *
+ * Physical: power key ONLY, via the MT6323 PMIC (mt6323keys above,
+ * KEY_POWER). No hardware keypad matrix exists on S6, so the base
+ * mt6572.dtsi "keyboard" node is left at its default status="disabled"
+ * and no &keyboard override is provided here.
+ *
+ * Virtual keys (Android style), reported by the Focaltech FTS
+ * touchscreen driver once it is enabled -- NOT a hardware matrix:
+ *   - volume up
+ *   - volume down
+ *   - home (Android nav bar style)
+ *   - two audio-specific touch keys
+ *
+ * TODO (future work): enable the FTS touchscreen node under i2c1 with a
+ * proper virtual-key keymap (linux,keymap / focaltech,virtualkey data)
+ * after the controller instance is identified from I2C probing or the
+ * vendor kernel.
+ */
+
+/*
+ * I2C1 kept enabled with pads muxed for the future Focaltech FTS touch
+ * node. S6 touch is FTS over I2C (controller address/wake/reset GPIOs not
+ * yet captured from the vendor kernel) -- deliberately NO touchscreen
+ * child node on first boot; add the fts node after an I2C1 scan or vendor
+ * kernel evidence identifies the exact controller instance.
+ */
+&i2c1 {
+	status = "okay";
+	pinctrl-0 = <&i2c1_pins>;
+	pinctrl-names = "default";
+	clock-frequency = <400000>;
+};
