@@ -9,9 +9,23 @@
  * Minimal bring-up S6 dts: eMMC (mmc0) + UART + USB only.
  *
  * Display: S6 LCD is an MCU parallel panel (gc9307 / nv3029s / st7789v),
- * NOT DSI. Mainline has no MCU-panel driver, so display relies on the
- * simple-framebuffer handed over by LK (chosen/framebuffer0 below), same
- * approach as Z1. No DSI panel node here.
+ * NOT DSI. Mainline has no MCU-panel driver.
+ *
+ * simple-framebuffer (the Z1 approach, chosen/framebuffer0 below) is
+ * RESEARCHED AND LIKELY NOT VALID here: DSI/DPI panels are continuously
+ * DMA-refreshed from a live DRAM surface, which is exactly why Z1's
+ * fixed-address handoff works. MCU/8080-parallel panels have their own
+ * internal GRAM and are pushed via one-shot burst writes over the MCU/DBI
+ * bus (LK's disp_lcm_init/lcm_update); once that burst completes there is
+ * no persistent, continuously-refreshed DRAM surface for simple-framebuffer
+ * to reference, and nothing keeps driving that memory after LK exits.
+ * The framebuffer0 node below is kept only as an unverified placeholder
+ * (Z1's numbers) -- expect it to show nothing on real hardware. The real
+ * fix is CONFIG_FB_MTK or a from-scratch MCU LCM driver ported from the
+ * vendor gc9307_mcu_6572_s6_24_hsd / nv3029s_mcu_6572 / st7789v_mcu_6572
+ * sources, issuing MCU-bus writes on each refresh like the vendor driver
+ * does. Do not spend more effort tuning simple-framebuffer geometry for
+ * this device before that driver work happens.
  *
  * Touch: Focaltech FTS I2C (not Goodix). Intentionally left out / disabled
  * on first boot until the FTS driver node is added after bus probing.
@@ -53,12 +67,13 @@
 		linux,initrd-end = <0x841e2810>;
 
 		/*
-		 * S6: resolution/base TBC on first boot -- these are the Z1
-		 * values (LK leaves OVL layer 2 scanning a 240x320 RGB565
-		 * surface at 0xbfd00000). S6's MCU parallel panel may make LK
-		 * compose a different layout, so verify width/height/stride
-		 * and the physical base against the first real S6 boot log
-		 * before trusting this surface.
+		 * These are just the Z1 DSI-panel numbers carried over unverified.
+		 * Per research (see header comment above), MCU-parallel panels
+		 * have no persistent DMA-refreshed DRAM surface at all, so this
+		 * node is expected to be non-functional on S6 as-is, not merely
+		 * mis-sized. Kept only so the node exists if it ever turns out
+		 * LK does leave a real composited surface for this panel;
+		 * otherwise a real MCU LCM driver is required for display.
 		 */
 		framebuffer0: framebuffer@bfd00000 {
 			compatible = "simple-framebuffer";
