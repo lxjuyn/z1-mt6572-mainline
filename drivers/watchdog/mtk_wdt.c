@@ -32,6 +32,7 @@
 #include <linux/types.h>
 #include <linux/watchdog.h>
 #include <linux/interrupt.h>
+#include <linux/workqueue.h>
 
 #define WDT_MAX_TIMEOUT		31
 #define WDT_MIN_TIMEOUT		2
@@ -78,6 +79,15 @@ struct mtk_wdt_dev {
 	bool disable_wdt_extrst;
 	bool reset_by_toprgu;
 	bool has_swsysrst_en;
+	/*
+	 * Z1 safety net: If the LK bootloader armed the HW WDT but no
+	 * user-space process opens /dev/watchdog, the WDT bites after
+	 * its hardware timeout (~30s) causing a silent reboot.
+	 * Schedule a delayed_work to disable WDT if it hasn't been opened.
+	 * If user-space opens /dev/watchdog before the timeout, mtk_wdt_start()
+	 * re-enables WDT normally.
+	 */
+	struct delayed_work z1_safety_disable;
 };
 
 struct mtk_wdt_data {
@@ -400,6 +410,42 @@ static const struct watchdog_ops mtk_wdt_ops = {
 	.restart	= mtk_wdt_restart,
 };
 
+/*
+ * Z1 safety-net work: if LK armed the HW WDT and no user-space process
+ * has opened /dev/watchdog to feed it, disable the WDT to prevent an
+ * uncontrolled reboot.  Scheduled at probe; cancelled if /dev/watchdog
+ * is opened before the timeout.
+ *
+ * Timing: LK typically arms WDT with ~30s timeout.  Probe runs at ~7s.
+ * Delay = 20s → fires at ~27s, 3s before the ~30s bite.  Safe margin.
+ *
+ * If user-space opens /dev/watchdog after we disable it, mtk_wdt_start()
+ * re-enables WDT normally — no side effects.
+ */
+static void z1_wdt_safety_disable_work(struct work_struct *work)
+{
+	struct mtk_wdt_dev *mtk_wdt = container_of(to_delayed_work(work),
+						    struct mtk_wdt_dev,
+						    z1_safety_disable);
+	void __iomem *wdt_base = mtk_wdt->wdt_base;
+	u32 reg;
+
+	if (!watchdog_active(&mtk_wdt->wdt_dev)) {
+		/* Not opened by user-space → disable to prevent bite */
+		reg = readl(wdt_base + WDT_MODE);
+		if (reg & WDT_MODE_EN) {
+			reg &= ~WDT_MODE_EN;
+			reg |= WDT_MODE_KEY;
+			iowrite32(reg, wdt_base + WDT_MODE);
+			dev_info(mtk_wdt->wdt_dev.parent,
+				 "WDT safety net: no user-space feed, disabling HW WDT to prevent reboot\n");
+		}
+	} else {
+		dev_dbg(mtk_wdt->wdt_dev.parent,
+			"WDT safety net: user-space active, no action needed\n");
+	}
+}
+
 static int mtk_wdt_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -446,6 +492,20 @@ static int mtk_wdt_probe(struct platform_device *pdev)
 	watchdog_set_drvdata(&mtk_wdt->wdt_dev, mtk_wdt);
 
 	mtk_wdt_init(&mtk_wdt->wdt_dev);
+
+	/*
+	 * Z1 safety net: if LK left the HW WDT running, schedule a delayed
+	 * disable.  If user-space opens /dev/watchdog within 20s, the
+	 * watchdog_active() check in the work handler will skip the disable,
+	 * and mtk_wdt_start() will re-enable it normally.
+	 */
+	if (test_bit(WDOG_HW_RUNNING, &mtk_wdt->wdt_dev.status)) {
+		INIT_DELAYED_WORK(&mtk_wdt->z1_safety_disable,
+				   z1_wdt_safety_disable_work);
+		schedule_delayed_work(&mtk_wdt->z1_safety_disable,
+				      msecs_to_jiffies(18000));
+		dev_info(dev, "WDT safety net: scheduling disable in 18s if no user-space feed\n");
+	}
 
 	watchdog_stop_on_reboot(&mtk_wdt->wdt_dev);
 	err = devm_watchdog_register_device(dev, &mtk_wdt->wdt_dev);
