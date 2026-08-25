@@ -33,13 +33,16 @@
 		 * Z1 LK relocates the MTK ROOTFS payload to 0x84100000.  Its
 		 * ATAG_INITRD2 handoff is not present at runtime, so provide the
 		 * measured range explicitly for this packaged logger ramdisk.
-		 * LK reports payload length 0x104f22 for this image.
-		 * ramdisk_ttygs0_loop.gz body is 0x10ac7d (loop-getty repack:
-		 * respawns getty on ttyGS0 so replug restores the shell),
-		 * so the end must match or the initrd is truncated.
+		 * RULE: linux,initrd-end MUST equal 0x84100000 + ramdisk payload
+		 * byte count; it must be recomputed whenever the ramdisk is
+		 * replaced or re-compressed, or the initrd gets truncated and
+		 * the gzip stream aborts with "read error".
+		 * Current payload: out/ramdisk_v11_extracted.gz body is
+		 * 1,068,865 (0x104f41) bytes (file is 1,069,377 B incl. the
+		 * 512B MTK ROOTFS header), so end = 0x84100000 + 0x104f41.
 		 */
 		linux,initrd-start = <0x84100000>;
-		linux,initrd-end = <0x841e2810>;
+		linux,initrd-end = <0x84204f41>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
