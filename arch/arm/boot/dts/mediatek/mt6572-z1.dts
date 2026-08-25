@@ -401,6 +401,11 @@
 	assigned-clock-parents = <&uart_clk>;
 };
 
+/*
+ * v13.2b 隔离测试：临时禁用 eMMC（&mmc0），验证 v13.1 的 eMMC CMD1 硬挂起
+ * 是否为唯一挂源（小 ramdisk 路线 root=/dev/ram 不依赖 eMMC）。
+ * 验证用，勿长期保留；Alpine/p4 路线需要恢复 status = "okay"。
+ */
 &mmc0 {
 	compatible = "mediatek,mt6572-mmc",
 		     "mediatek,mt7623-mmc",
@@ -412,7 +417,7 @@
 	no-sd;
 	no-sdio;
 	non-removable;
-	status = "okay";
+	status = "disabled";
 };
 
 &pio {
