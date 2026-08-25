@@ -1959,8 +1959,9 @@ static irqreturn_t msdc_irq(int irq, void *dev_id)
 {
 	struct msdc_host *host = (struct msdc_host *) dev_id;
 	struct mmc_host *mmc = mmc_from_priv(host);
+	int loops;
 
-	while (true) {
+	for (loops = 0; loops < 1000; loops++) {
 		struct mmc_request *mrq;
 		struct mmc_command *cmd;
 		struct mmc_data *data;
@@ -2013,6 +2014,19 @@ static irqreturn_t msdc_irq(int irq, void *dev_id)
 			msdc_cmd_done(host, events, mrq, cmd);
 		else if (data)
 			msdc_data_xfer_done(host, events, mrq, data);
+	}
+	if (loops >= 1000) {
+		/*
+		 * Z1 hardening: the LK-handoff MSDC can wedge with CMDRDY never
+		 * firing (v13.1 froze the whole machine in this loop).  1000
+		 * iterations far exceed any normal single-IRQ burst; bail out so
+		 * the 5 s req_timeout fallback can recover the request instead of
+		 * livelocking the kernel.
+		 */
+		dev_err_ratelimited(host->dev,
+				    "%s: loop bound hit; int=%08x inten=%08x\n",
+				    __func__, readl(host->base + MSDC_INT),
+				    readl(host->base + MSDC_INTEN));
 	}
 
 	return IRQ_HANDLED;
@@ -3288,7 +3302,7 @@ static void msdc_z1_emmc_hw_reset(struct msdc_host *host)
 	sdr_set_bits(host->base + EMMC_IOCON, BIT(0));	/* BOOTRST=1: RST_n low */
 	msleep(5);
 	sdr_clr_bits(host->base + EMMC_IOCON, BIT(0));	/* BOOTRST=0: RST_n high */
-	msleep(10);					/* card power-on init window */
+	msleep(50);					/* card power-on init window */
 	dev_info(host->dev, "Z1 eMMC HW reset done: emmc_iocon=%08x ps=%08x\n",
 		 readl(host->base + EMMC_IOCON), readl(host->base + MSDC_PS));
 	msdc_z1_dump_mc0_pads(host, "post-emmc-hw-reset");
@@ -3302,10 +3316,10 @@ static void msdc_z1_emmc_hw_reset(struct msdc_host *host)
  * (CMDRDY never fires; on 2026-07-31 the diagnostic froze with no further
  * output and no req_timeout recovery).  Polling MSDC_INT with a hard deadline
  * cannot hang the kernel; on wedge the caller recovers the controller and
- * retries.  Used only inside z1_direct_cid with the MSDC IRQ disabled; no
- * eMMC media register or user data is touched.
+ * retries.  Used inside z1_direct_cid and the probe CMD1 pre-warm with the
+ * MSDC IRQ disabled; no eMMC media register or user data is touched.
  */
-static int __maybe_unused msdc_z1_cmd_poll(struct msdc_host *host, struct mmc_command *cmd)
+static int msdc_z1_cmd_poll(struct msdc_host *host, struct mmc_command *cmd)
 {
 	struct mmc_request mrq = { .cmd = cmd };
 	u32 rawcmd, events;
@@ -3368,6 +3382,64 @@ static void __maybe_unused msdc_z1_recover(struct msdc_host *host)
 	msdc_set_mclk(host, MMC_TIMING_LEGACY, Z1_DIAG_MAX_CLOCK_HZ);
 	writel(0xffff0009, host->base + MSDC_PATCH_BIT1);
 	msdc_z1_dump_regs(host, "post-recover");
+}
+
+/*
+ * Z1 CMD1 pre-warm: poll CMD1 (IRQ-independent, bounded) until the card
+ * reports OCR bit31 READY or an overall deadline expires.  The v13.1 hang was
+ * the mmc core firing CMD1 only ~10 ms after BOOTRST release while the eMMC
+ * was still busy (first response 00ff8080); the IRQ-path retry storm then
+ * wedged the controller.  Waiting here until the card is READY makes the
+ * core's first IRQ-path CMD1 answer immediately, as on the 8/15 good boot.
+ * Must be called with host->irq disabled: msdc_z1_cmd_poll programs MSDC_INTEN
+ * while no mrq is active.  Controller/card-state only; no media access.
+ */
+static void msdc_z1_prewarm_cmd1(struct msdc_host *host)
+{
+	struct mmc_command cmd;
+	unsigned long deadline = jiffies + msecs_to_jiffies(3000);
+	u32 ocr_arg = 0;
+	int i = 0, ret;
+
+	for (;;) {
+		u32 ps;
+
+		/*
+		 * Never write into a busy window: wait for the card to release
+		 * the open-drain CMD line before issuing the next CMD1.
+		 */
+		if (!readl_poll_timeout_atomic(host->base + MSDC_PS, ps,
+					       (ps & MSDC_PS_CMD), 10, 50000)) {
+			memset(&cmd, 0, sizeof(cmd));
+			cmd.opcode = MMC_SEND_OP_COND;
+			cmd.arg = ocr_arg;
+			cmd.flags = MMC_RSP_R3 | MMC_CMD_BCR;
+			ret = msdc_z1_cmd_poll(host, &cmd);
+			if (!ret) {
+				if (cmd.resp[0] & MMC_CARD_BUSY) {
+					dev_info(host->dev,
+						 "Z1 CMD1 pre-warm ready: i=%d OCR=%08x\n",
+						 i, cmd.resp[0]);
+					return;
+				}
+				ocr_arg = cmd.resp[0] | BIT(30);
+			} else {
+				dev_info(host->dev,
+					 "Z1 CMD1 pre-warm i=%d err=%d, recover+retry\n",
+					 i, ret);
+				msdc_z1_recover(host);
+			}
+		}
+		i++;
+		if (time_after(jiffies, deadline)) {
+			dev_info(host->dev,
+				 "Z1 CMD1 pre-warm timeout: i=%d OCR arg=%08x int=%08x ps=%08x\n",
+				 i, ocr_arg, readl(host->base + MSDC_INT),
+				 readl(host->base + MSDC_PS));
+			return;
+		}
+		usleep_range(20000, 40000);
+	}
 }
 
 static int __maybe_unused msdc_z1_validate_power(struct msdc_host *host)
@@ -3822,6 +3894,17 @@ static int msdc_drv_probe(struct platform_device *pdev)
 		 */
 		msdc_set_buswidth(host, MMC_BUS_WIDTH_1);
 		msdc_set_mclk(host, MMC_TIMING_LEGACY, Z1_DIAG_MAX_CLOCK_HZ);
+
+		/*
+		 * Pre-warm CMD1: poll until the eMMC leaves its post-BOOTRST
+		 * busy state so the mmc core's first IRQ-path CMD1 is answered
+		 * READY (the v13.1 wedge was CMD1 hitting a still-busy card).
+		 * The MSDC IRQ is not registered yet, but disable_irq() keeps the
+		 * polling window strictly IRQ-free in case one races in.
+		 */
+		disable_irq(host->irq);
+		msdc_z1_prewarm_cmd1(host);
+		enable_irq(host->irq);
 	}
 
 	if (mmc->caps2 & MMC_CAP2_CQE) {
