@@ -26,9 +26,15 @@
 		ranges;
 		/*
 		 * Z1 diagnostic: do not instantiate an early console from DT.
-		 * The normal 8250 console remains selected by the boot header.
+		 * v13.4 correction (review W1, 2026-08-29): this LK does NOT
+		 * forward the boot.img header --cmdline (board logs 8/26-27 show
+		 * the kernel cmdline equals these DT bootargs verbatim), so the
+		 * console selection lives HERE. The mainline 8250 registers the
+		 * uart0 OF node as ttyS0 (alias serial0), not ttyMT0; the last
+		 * console= wins /dev/console, so ttyS0 last gives the serial
+		 * port both the kernel log tail and the final console getty.
 		 */
-		bootargs = "console=tty0 console=ttyMT0,921600n8 root=/dev/ram panic=10 loglevel=7 clk_ignore_unused regulator_ignore_unused oops=panic sysrq_always_enabled rdinit=/init earlycon=mtk8250,0x11005000";
+		bootargs = "console=tty0 console=ttyS0,921600n8 root=/dev/ram panic=10 loglevel=7 clk_ignore_unused regulator_ignore_unused oops=panic sysrq_always_enabled rdinit=/init earlycon=mtk8250,0x11005000";
 		/*
 		 * Z1 LK relocates the MTK ROOTFS payload to 0x84100000.  Its
 		 * ATAG_INITRD2 handoff is not present at runtime, so provide the
@@ -37,16 +43,19 @@
 		 * byte count; it must be recomputed whenever the ramdisk is
 		 * replaced or re-compressed, or the initrd gets truncated and
 		 * the gzip stream aborts with "read error".
-		 * Current payload: out/ramdisk_v13_3_acm.gz body is
-		 * 1,069,518 (0x1051ce) bytes (file is 1,070,030 B incl. the
-		 * 512B MTK ROOTFS header), so end = 0x84100000 + 0x1051ce.
+		 * Current payload: out/ramdisk_v13_4_acm.gz body is
+		 * 1,271,370 (0x13664a) bytes (file is 1,271,882 B incl. the
+		 * 512B MTK ROOTFS header), so end = 0x84100000 + 0x13664a.
 		 * v13.3 ramdisk: /init rewritten to bind a mainline configfs
 		 * CDC-ACM gadget -> /dev/ttyGS0 (replaces dead android_usb path).
 		 * v13.3b: review fixes - full [acm] self-reporting (incl. ln -s
 		 * result) and [ -e /dev/tty0 ] guard on the tty0 getty.
+		 * v13.4: same /init as v13.3b + sbin/i2cprobe (narrow-address
+		 * probe + read-only register dump) for the CST836U@0x15 /
+		 * S6-FTS@0x38 touch identity evidence run.
 		 */
 		linux,initrd-start = <0x84100000>;
-		linux,initrd-end = <0x842051ce>;
+		linux,initrd-end = <0x8423664a>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
@@ -494,11 +503,27 @@
 	clock-frequency = <400000>;
 
 	/*
-	 * Unverified reference-board candidate only. GPIO128/129 and GT9XX
-	 * came from cci72_we_jb3, not from proven Z1 hardware evidence.
-	 * The Z1 vendor log instead probes hyn_ts at 0x15 and reports that
-	 * neither capacitive nor generic touch loaded. Keep disabled until an
-	 * I2C1 scan or board evidence identifies the actual controller.
+	 * Touch identity evidence (updated 2026-08-29, see
+	 * mainline_recon/TOUCH_CST836U_20260829.md):
+	 * - Factory kernel carries a Hynitron CST836U driver ("HYN_CST836U_
+	 *   DWZN_MT6572_4.4_V1.0_20181106" inside 1/boot.img) and the vendor
+	 *   runtime probed hyn_ts at I2C1 0x15 (probe FAILED, physical
+	 *   presence unproven).
+	 * - EdgeTX upstream (radio/src/targets/pl18/touch_driver.cpp) drives a
+	 *   CST836U at 0x15 with an FT6206-style 8-bit-register protocol:
+	 *   0x02 touch count, 0x03..06 XH/XL/YH/YL (12-bit, event bits 7:6,
+	 *   contact=2), identity at 0xa6-0xab.  => the in-tree edt-ft5x06
+	 *   driver with compatible "focaltech,ft6236" is the match; the two
+	 *   hynitron-* drivers in-tree are NOT (CST3XX 16-bit / CST816S 0x01
+	 *   protocols).  CONFIG_TOUCHSCREEN_EDT_FT5X06=m is already set.
+	 * - Reset/IRQ GPIOs remain UNPROVEN for Z1 (128/129 are reference-
+	 *   board values), so no client node is enabled yet: v13.4 ships
+	 *   sbin/i2cprobe; run on-board (serial shell):
+	 *     i2cprobe /dev/i2c-1 0x15
+	 *     i2cprobe /dev/i2c-1 dump 0x15 0xa6 6   # FW/module/project/chip-id
+	 * Enable the ft6236 node only after that evidence and proven GPIOs.
+	 * GT911 stays disabled (audit: factory-image evidence outranks the
+	 * cci72_we_jb3 reference-board guess).
 	 */
 	touchscreen@5d {
 		status = "disabled";

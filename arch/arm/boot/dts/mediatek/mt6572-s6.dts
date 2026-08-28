@@ -39,7 +39,7 @@
 #include "mt6323.dtsi"
 
 / {
-	model = "S6 smartphone (alps I3)";
+	model = "S6 hearing aid (alps I3)";
 	compatible = "alps,s6", "mediatek,mt6572";
 
 	aliases {
@@ -51,10 +51,19 @@
 		#size-cells = <1>;
 		ranges;
 		/*
-		 * Do not instantiate an early console from DT.
-		 * The normal 8250 console remains selected by the boot header.
+		 * v13.4/s6_v4 corrections (2026-08-29):
+		 * - This LK does NOT forward the boot.img header --cmdline
+		 *   (Z1 board logs 8/26-27 show the kernel cmdline equals the DT
+		 *   bootargs verbatim), so console selection lives HERE.
+		 * - The mainline 8250 registers the uart0 OF node as ttyS0
+		 *   (alias serial0), not ttyMT0; the earlier ttyMT0 (and the
+		 *   bogus ttyACM0, which is a HOST-side gadget name - the device
+		 *   side CDC-ACM port is ttyGS0) were never valid console names.
+		 *   The last console= wins /dev/console: ttyS0 last so that if an
+		 *   S6 UART test point is ever found, the console getty is there;
+		 *   the LCD (tty0) also carries the kernel log.
 		 */
-		bootargs = "console=tty0 console=ttyACM0,921600n8 console=ttyMT0,921600n8 root=/dev/ram panic=10 loglevel=7 clk_ignore_unused regulator_ignore_unused oops=panic sysrq_always_enabled rdinit=/init earlycon=mtk8250,0x11005000";
+		bootargs = "console=tty0 console=ttyS0,921600n8 root=/dev/ram panic=10 loglevel=7 clk_ignore_unused regulator_ignore_unused oops=panic sysrq_always_enabled rdinit=/init earlycon=mtk8250,0x11005000";
 		/*
 		 * Same MTK preloader/LK handoff as Z1: LK relocates the MTK
 		 * ROOTFS payload to 0x84100000 and its ATAG_INITRD2 handoff is
@@ -62,9 +71,14 @@
 		 * explicitly for the packaged logger ramdisk (same ramdisk
 		 * payload reused from Z1; end must match its length or the
 		 * initrd is truncated).
+		 * v13.4/s6_v4: payload is out/ramdisk_v13_4_acm.gz, body
+		 * 1,271,370 (0x13664a) bytes -> end = 0x84100000 + 0x13664a.
+		 * (The old 0x841e2810 here was the same stale value Z1 fixed in
+		 * v13.1/47fd7e872 - it truncated the initrd and caused gzip
+		 * "read error"; never copy a payload length from another image.)
 		 */
 		linux,initrd-start = <0x84100000>;
-		linux,initrd-end = <0x841e2810>;
+		linux,initrd-end = <0x8423664a>;
 
 		/*
 		 * These are just the Z1 DSI-panel numbers carried over unverified.
