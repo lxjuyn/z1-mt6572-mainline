@@ -38,13 +38,15 @@
 		 * replaced or re-compressed, or the initrd gets truncated and
 		 * the gzip stream aborts with "read error".
 		 * Current payload: out/ramdisk_v13_3_acm.gz body is
-		 * 1,069,384 (0x105148) bytes (file is 1,069,896 B incl. the
-		 * 512B MTK ROOTFS header), so end = 0x84100000 + 0x105148.
+		 * 1,069,518 (0x1051ce) bytes (file is 1,070,030 B incl. the
+		 * 512B MTK ROOTFS header), so end = 0x84100000 + 0x1051ce.
 		 * v13.3 ramdisk: /init rewritten to bind a mainline configfs
 		 * CDC-ACM gadget -> /dev/ttyGS0 (replaces dead android_usb path).
+		 * v13.3b: review fixes - full [acm] self-reporting (incl. ln -s
+		 * result) and [ -e /dev/tty0 ] guard on the tty0 getty.
 		 */
 		linux,initrd-start = <0x84100000>;
-		linux,initrd-end = <0x84205148>;
+		linux,initrd-end = <0x842051ce>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
