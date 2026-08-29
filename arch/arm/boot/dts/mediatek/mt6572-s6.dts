@@ -80,6 +80,12 @@
 		 * (= v13.5 + pstore mount + previous-crash console-ramoops-0
 		 * spool over ACM in /init), body 1,269,732 (0x135fe4) bytes ->
 		 * end = 0x84100000 + 0x135fe4 = 0x84235fe4.
+		 * v13.7/s6_v7 (2026-08-30): payload is out/ramdisk_v13_7_acm.gz
+		 * (= v13.6 with the replay-first timing fix in /init: blocking
+		 * pstore/klog replay completes BEFORE the ttyGS0 getty/live-tail
+		 * start, so replay bytes can no longer flood the shell stdin;
+		 * + stty -echo hardening), body 1,270,523 (0x1362fb) bytes ->
+		 * end = 0x84100000 + 0x1362fb = 0x842362fb.
 		 * v13.5 (2026-08-29): = v13.4r + klog-over-ACM forwarding — /init
 		 * backgrounded setsid mirror: dmesg full ring dump then live
 		 * tail -f /proc/kmsg to /dev/ttyGS0 ([klog] banners). This is the
@@ -92,7 +98,7 @@
 		 * "read error"; never copy a payload length from another image.)
 		 */
 		linux,initrd-start = <0x84100000>;
-		linux,initrd-end = <0x84235fe4>;
+		linux,initrd-end = <0x842362fb>;
 
 		/*
 		 * s6_v6 fbfix (2026-08-30): the former framebuffer0
