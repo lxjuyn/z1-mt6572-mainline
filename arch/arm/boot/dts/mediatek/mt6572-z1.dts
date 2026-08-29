@@ -44,8 +44,8 @@
 		 * replaced or re-compressed, or the initrd gets truncated and
 		 * the gzip stream aborts with "read error".
 		 * Current payload: out/ramdisk_v13_4_acm.gz body is
-		 * 1,271,370 (0x13664a) bytes (file is 1,271,882 B incl. the
-		 * 512B MTK ROOTFS header), so end = 0x84100000 + 0x13664a.
+		 * 1,268,720 (0x135bf0) bytes (file is 1,269,232 B incl. the
+		 * 512B MTK ROOTFS header), so end = 0x84100000 + 0x135bf0.
 		 * v13.3 ramdisk: /init rewritten to bind a mainline configfs
 		 * CDC-ACM gadget -> /dev/ttyGS0 (replaces dead android_usb path).
 		 * v13.3b: review fixes - full [acm] self-reporting (incl. ln -s
@@ -53,9 +53,14 @@
 		 * v13.4: same /init as v13.3b + sbin/i2cprobe (narrow-address
 		 * probe + read-only register dump) for the CST836U@0x15 /
 		 * S6-FTS@0x38 touch identity evidence run.
+		 * v13.4r (review fixes 2026-08-29): /init PID1 console getty now
+		 * respawns in a loop (shell exit no longer kills PID1 -> panic
+		 * reboot); i2cprobe binds I2C_SLAVE before SMBus quick (was
+		 * probing stale client addr) and reports EBUSY distinctly;
+		 * stray packaging artifact body_new.gz dropped from archive.
 		 */
 		linux,initrd-start = <0x84100000>;
-		linux,initrd-end = <0x8423664a>;
+		linux,initrd-end = <0x84235bf0>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
