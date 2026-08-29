@@ -73,6 +73,10 @@
 		 * initrd is truncated).
 		 * v13.5/s6_v5: payload is out/ramdisk_v13_5_acm.gz, body
 		 * 1,269,042 (0x135d32) bytes -> end = 0x84100000 + 0x135d32.
+		 * v13.6/s6_v6 (2026-08-29): payload is out/ramdisk_v13_6_acm.gz
+		 * (= v13.5 + pstore mount + previous-crash console-ramoops-0
+		 * spool over ACM in /init), body 1,269,732 (0x135fe4) bytes ->
+		 * end = 0x84100000 + 0x135fe4 = 0x84235fe4.
 		 * v13.5 (2026-08-29): = v13.4r + klog-over-ACM forwarding — /init
 		 * backgrounded setsid mirror: dmesg full ring dump then live
 		 * tail -f /proc/kmsg to /dev/ttyGS0 ([klog] banners). This is the
@@ -85,7 +89,7 @@
 		 * "read error"; never copy a payload length from another image.)
 		 */
 		linux,initrd-start = <0x84100000>;
-		linux,initrd-end = <0x84235d32>;
+		linux,initrd-end = <0x84235fe4>;
 
 		/*
 		 * These are just the Z1 DSI-panel numbers carried over unverified.
@@ -106,9 +110,20 @@
 		};
 	};
 
+	/*
+	 * s6_v6 (2026-08-29): declare 512 MB instead of 1 GB. This is both a
+	 * HEDGE and a DISCRIMINATOR: the S6 real RAM size was never confirmed
+	 * (vendor tree says 512 MB-class boards are common on this chassis),
+	 * and declaring less than physical RAM is always safe while declaring
+	 * more than physical is fatal (kernel touches unmapped rows -> silent
+	 * reset well before userspace, exactly the s6_v5 ~25 s bootloop with
+	 * zero USB gadget enumeration). If s6_v6 boots with 0x20000000 here,
+	 * the "hardcoded 1 GB" assumption is confirmed as the s6_v5 root
+	 * cause; the true size can then be measured upward safely.
+	 */
 	memory@80000000 {
 		device_type = "memory";
-		reg = <0x80000000 0x40000000>;
+		reg = <0x80000000 0x20000000>;
 	};
 
 	reserved-memory {
@@ -139,6 +154,29 @@
 			alloc-ranges = <0x90000000 0x10000000>;
 			reusable;
 			linux,cma-default;
+		};
+
+		/*
+		 * s6_v6 (2026-08-29): ramoops crash black box. S6 has no UART
+		 * testpoints and s6_v5 died before userspace, so nothing ever
+		 * reached USB. ramoops survives reboots in DRAM and /init
+		 * (v13.6) spools console-ramoops-0 out over the ACM gadget on
+		 * the NEXT successful boot; it can also be read between boots
+		 * with mtkclient `mtk da peek` (see PACKAGE_NOTE_s6_v6.md).
+		 *
+		 * Region choice: 0x86000000..0x86100000 avoids the kernel
+		 * (0x80008000+), the initrd (0x84100000-0x84235dxx) and stays
+		 * inside the (hedge-safe) 512 MB window (< 0xA0000000), so it
+		 * is mapped even if S6 only has 512 MB. All PSTORE* configs
+		 * are already =y; only this node was missing.
+		 */
+		ramoops@86000000 {
+			compatible = "ramoops";
+			reg = <0x86000000 0x100000>;
+			record-size  = <0x20000>;
+			console-size = <0x80000>;
+			pmsg-size = <0x10000>;
+			ecc-size = <16>;
 		};
 	};
 
@@ -386,7 +424,14 @@
 	no-sd;
 	no-sdio;
 	non-removable;
-	status = "okay";
+	/*
+	 * s6_v6 (2026-08-29): DISABLED to isolate variables. The mtk-sd
+	 * driver gates its probe on of_machine_is_compatible("jbo,z1"), which
+	 * is false on S6 ("alps,s6"), so mmc0 probe would fail/defer here and
+	 * pollute the crash investigation. TODO: fix the machine-compat gate
+	 * in the driver (accept S6), then re-enable this node.
+	 */
+	status = "disabled";
 };
 
 &pio {
