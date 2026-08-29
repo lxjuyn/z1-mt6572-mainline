@@ -43,9 +43,9 @@
 		 * byte count; it must be recomputed whenever the ramdisk is
 		 * replaced or re-compressed, or the initrd gets truncated and
 		 * the gzip stream aborts with "read error".
-		 * Current payload: out/ramdisk_v13_4_acm.gz body is
-		 * 1,268,720 (0x135bf0) bytes (file is 1,269,232 B incl. the
-		 * 512B MTK ROOTFS header), so end = 0x84100000 + 0x135bf0.
+		 * Current payload: out/ramdisk_v13_5_acm.gz body is
+		 * 1,269,042 (0x135d32) bytes (file is 1,269,554 B incl. the
+		 * 512B MTK ROOTFS header), so end = 0x84100000 + 0x135d32.
 		 * v13.3 ramdisk: /init rewritten to bind a mainline configfs
 		 * CDC-ACM gadget -> /dev/ttyGS0 (replaces dead android_usb path).
 		 * v13.3b: review fixes - full [acm] self-reporting (incl. ln -s
@@ -58,9 +58,13 @@
 		 * reboot); i2cprobe binds I2C_SLAVE before SMBus quick (was
 		 * probing stale client addr) and reports EBUSY distinctly;
 		 * stray packaging artifact body_new.gz dropped from archive.
+		 * v13.5 (2026-08-29): = v13.4r + klog-over-ACM forwarding — /init
+		 * backgrounded setsid mirror: dmesg full ring dump then live
+		 * tail -f /proc/kmsg to /dev/ttyGS0 ([klog] banners), kernel-log
+		 * channel for S6 which has no UART testpoints.
 		 */
 		linux,initrd-start = <0x84100000>;
-		linux,initrd-end = <0x84235bf0>;
+		linux,initrd-end = <0x84235d32>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
