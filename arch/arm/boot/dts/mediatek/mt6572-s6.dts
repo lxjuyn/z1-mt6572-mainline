@@ -38,6 +38,7 @@
 /dts-v1/;
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
 #include "mt6572.dtsi"
 #include "mt6323.dtsi"
 
@@ -337,6 +338,38 @@
 		regulator-max-microvolt = <5000000>;
 		regulator-always-on;
 	};
+
+	/*
+	 * Backlight route 1 (BLS/disp-PWM): the MT6572 display-block PWM
+	 * (bls node in mt6572.dtsi, compatible mediatek,mt2701-disp-pwm).
+	 * On the vendor reference platform the LCD backlight is driven from
+	 * the BLS. This node is the active route; the ISINK route below is
+	 * disabled for now to avoid two /sys/class/backlight entries.
+	 */
+	backlight_bls: backlight-bls {
+		compatible = "pwm-backlight";
+		pwms = <&bls 0 100000>;
+		brightness-levels = <0 32 64 128 192 255>;
+		default-brightness-level = <5>;
+		status = "okay";
+	};
+
+	/*
+	 * Backlight route 2 (PMIC ISINK): some MT6572 boards source the LCD
+	 * backlight current from an MT6323 ISINK channel instead of the BLS.
+	 * leds-mt6323 registers led@0 below; this node wraps it into
+	 * /sys/class/backlight via led_bl.c (CONFIG_BACKLIGHT_LED).
+	 *
+	 * CURRENTLY DISABLED: pwm-backlight and led-backlight would both
+	 * claim /sys/class/backlight. To switch routes on-board:
+	 *   1. set backlight_bls above to status = "disabled"
+	 *   2. set this node to status = "okay"
+	 */
+	backlight_isink: backlight-isink {
+		compatible = "led-backlight";
+		leds = <&led0_isink>;
+		status = "disabled";
+	};
 };
 
 &uart0 {
@@ -523,4 +556,33 @@
 	pinctrl-0 = <&i2c1_pins>;
 	pinctrl-names = "default";
 	clock-frequency = <400000>;
+};
+
+/*
+ * Display backlight PWM (BLS), mediatek,mt2701-disp-pwm. Enabled so the
+ * pwm-backlight node in the root can bind; on vendor S6 reference designs
+ * the LCD backlight is driven from here.
+ */
+&bls {
+	status = "okay";
+};
+
+/*
+ * MT6323 PMIC ISINK LEDs. led@0 = LCD backlight current source on the
+ * vendor reference board. Kept enabled alongside the BLS route: registering
+ * the LED itself is harmless while backlight_isink stays disabled; if the
+ * BLS route turns out wrong on-board, flip the two backlight nodes'
+ * statuses (see comments in the root node).
+ * Binding reference: mt6572-prestigio-pap5500-duo.dts, leds-mt6323.c.
+ * TBC: which ISINK channel actually feeds the S6 backlight (0 assumed).
+ */
+&mt6323_leds {
+	status = "okay";
+
+	led0_isink: led@0 {
+		reg = <0>;
+		function = LED_FUNCTION_BACKLIGHT;
+		color = <LED_COLOR_ID_WHITE>;
+		default-state = "off";
+	};
 };
