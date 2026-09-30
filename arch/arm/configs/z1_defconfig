@@ -1363,3 +1363,6 @@ CONFIG_USB_MUSB_MEDIATEK=y
 # CONFIG_USB_MUSB_HOST is not set
 # CONFIG_PHY_MTK_TPHY is not set
 CONFIG_PHY_MTK_MT6572_USB2_HANDOFF=y
+
+# Android SELinux labels on ext4 require the security xattr handler.
+CONFIG_EXT4_FS_SECURITY=y
