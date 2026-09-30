@@ -34,7 +34,7 @@
 		 * console= wins /dev/console, so ttyS0 last gives the serial
 		 * port both the kernel log tail and the final console getty.
 		 */
-		bootargs = "console=tty0 console=ttyS0,921600n8 root=/dev/ram panic=10 loglevel=7 clk_ignore_unused regulator_ignore_unused oops=panic sysrq_always_enabled rdinit=/init earlycon=mtk8250,0x11005000";
+		bootargs = "console=tty0 console=ttyS0,921600n8 root=/dev/ram panic=10 loglevel=7 clk_ignore_unused regulator_ignore_unused oops=panic sysrq_always_enabled rdinit=/init earlycon=mtk8250,0x11005000 androidboot.hardware=z1";
 		/*
 		 * Z1 LK relocates the MTK ROOTFS payload to 0x84100000.  Its
 		 * ATAG_INITRD2 handoff is not present at runtime, so provide the
