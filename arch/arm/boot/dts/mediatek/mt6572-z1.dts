@@ -274,10 +274,12 @@
 	 * values below are a generic Li-ion 3.7 V / ~2000 mAh placeholder --
 	 * TBC against the real Z1 battery on first physical measurement.
 	 *
-	 * adc_battery (adc-battery) reads two MT6323 AUXADC channels via
+	 * adc_battery (adc-battery) reads MT6323 AUXADC voltage via
 	 * &mt6323_adc (mediatek,mt6323-auxadc, a child of &pmic):
 	 *   - BATSNS (channel 7)  -> "voltage"     (battery terminal voltage)
-	 *   - BAT_TEMP (channel 2) -> "temperature" (battery temperature)
+	 * BAT_TEMP (channel 2) remains raw NTC voltage in IIO. Z1-specific
+	 * divider and thermistor calibration are not established, so it is
+	 * intentionally not connected to a temperature consumer.
 	 *
 	 * Keep status="disabled" until the kernel is built with:
 	 *   CONFIG_POWER_SUPPLY=y          (currently not set)
@@ -297,9 +299,12 @@
 
 	adc_battery: adc-battery {
 		compatible = "adc-battery";
-		io-channels = <&mt6323_adc MT6323_AUXADC_BATSNS>,
-			      <&mt6323_adc MT6323_AUXADC_BAT_TEMP>;
-		io-channel-names = "voltage", "temperature";
+		/* BAT_TEMP is an NTC divider voltage, not an IIO_TEMP channel.
+		 * Leave it available in the AUXADC provider for calibration, but
+		 * do not expose it as power_supply temperature before conversion.
+		 */
+		io-channels = <&mt6323_adc MT6323_AUXADC_BATSNS>;
+		io-channel-names = "voltage";
 		monitored-battery = <&battery>;
 		status = "okay";
 	};

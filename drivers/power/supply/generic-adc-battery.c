@@ -89,9 +89,15 @@ static int gab_read_channel(struct gab *adc_bat, enum gab_chan_type channel,
 {
 	int ret;
 
+	if (!adc_bat->channel[channel])
+		return -ENODATA;
+
 	ret = iio_read_channel_processed(adc_bat->channel[channel], result);
 	if (ret < 0)
 		dev_err(&adc_bat->psy->dev, "read channel error: %d\n", ret);
+	else if (channel == GAB_TEMP)
+		/* IIO temperature is milli-Celsius; power_supply uses 0.1 C. */
+		*result /= 100;
 	else
 		*result *= 1000;
 
@@ -202,9 +208,24 @@ static int gab_probe(struct platform_device *pdev)
 			if (ret != -ENODEV)
 				return dev_err_probe(&pdev->dev, ret, "Failed to get ADC channel %s\n", gab_chan_name[chan]);
 			adc_bat->channel[chan] = NULL;
+			if (chan == GAB_TEMP)
+				dev_warn(&pdev->dev,
+					 "Temperature unavailable: no calibrated IIO_TEMP channel\n");
 		} else if (adc_bat->channel[chan]) {
 			/* copying properties for supported channels only */
 			int index2;
+
+			if (chan == GAB_TEMP) {
+				enum iio_chan_type type;
+
+				ret = iio_get_channel_type(adc_bat->channel[chan], &type);
+				if (ret < 0 || type != IIO_TEMP) {
+					dev_warn(&pdev->dev,
+						 "Temperature unavailable: channel is not IIO_TEMP; calibrated conversion required\n");
+					adc_bat->channel[chan] = NULL;
+					continue;
+				}
+			}
 
 			for (index2 = 0; index2 < index; index2++) {
 				if (properties[index2] == gab_dyn_props[chan])
