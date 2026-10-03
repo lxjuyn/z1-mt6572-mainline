@@ -2,7 +2,12 @@ DEVICE_PATH := device/jiabo/z1
 
 # MT6572 uses ARM32 userspace. Modern mainline Binder exposes protocol 8
 # (64-bit transfer fields), which Pie supports independently of CPU bitness.
+ifeq ($(Z1_KERNEL_VARIANT),stock)
+# The exact A7/factory 3.4.67 kernel exposes protocol 7 and 32-bit fields.
+TARGET_USES_64_BIT_BINDER := false
+else
 TARGET_USES_64_BIT_BINDER := true
+endif
 TARGET_ARCH := arm
 TARGET_ARCH_VARIANT := armv7-a-neon
 TARGET_CPU_ABI := armeabi-v7a
@@ -46,7 +51,11 @@ BOARD_CACHEIMAGE_PARTITION_SIZE := 236978176
 TARGET_RECOVERY_FSTAB := $(DEVICE_PATH)/rootdir/fstab.z1
 
 USE_XML_AUDIO_POLICY_CONF := 1
+ifeq ($(Z1_KERNEL_VARIANT),stock)
+DEVICE_MANIFEST_FILE := $(DEVICE_PATH)/stock/manifest.xml
+else
 DEVICE_MANIFEST_FILE := $(DEVICE_PATH)/rootdir/manifest.xml
+endif
 
 # Non-Treble: no BOARD_VNDK_VERSION, independent vendor image, or
 # TARGET_COPY_OUT_VENDOR override. Pie will use system/vendor.

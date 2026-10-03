@@ -10,6 +10,10 @@
 #include <stdint.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <sys/ioctl.h>
+#include <sys/sysmacros.h>
+#include <sys/utsname.h>
+#include <linux/kd.h>
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/vfs.h>
@@ -20,6 +24,8 @@
 #include <unistd.h>
 
 static int logfd = -1;
+static unsigned char *stock_history;
+static uint64_t *stock_history_end;
 
 /* At most 89 bytes before newline, including the visible prefix. */
 static void logmsg(const char *fmt, ...)
@@ -423,7 +429,12 @@ static void acmlog(const char *what, int error)
     char line[256];
     int n = snprintf(line, sizeof(line), "[z1acm] %s errno=%d\n", what, error);
     if (n > 0) {
-        ssize_t ignored = write(logfd >= 0 ? logfd : STDERR_FILENO, line, (size_t)n);
+        size_t i, count = (size_t)n;
+        if (count >= sizeof(line)) count = sizeof(line) - 1;
+        if (stock_history && stock_history_end)
+            for (i = 0; i < count; ++i)
+                stock_history[((*stock_history_end)++) % HISTORY_SIZE] = (unsigned char)line[i];
+        ssize_t ignored = write(logfd >= 0 ? logfd : STDERR_FILENO, line, count);
         (void)ignored;
     }
 }
@@ -533,7 +544,422 @@ static int setup_acm(void)
     return 0;
 }
 
-static int acm_main(void)
+/* Stock 3.4 android_usb predates configfs. Keep this path independent. */
+#ifndef STOCK_USB
+#define STOCK_USB "/sys/class/android_usb/android0"
+#endif
+
+static int stock_attribute(const char *name, const char *value)
+{
+    char path[256];
+    ssize_t n;
+    int fd, saved;
+    if (snprintf(path, sizeof(path), STOCK_USB "/%s", name) >= (int)sizeof(path)) {
+        errno = ENAMETOOLONG; return -1;
+    }
+    fd = open(path, O_WRONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) return -1;
+    n = write(fd, value, strlen(value));
+    saved = errno;
+    if (close(fd) < 0 && n == (ssize_t)strlen(value)) return -1;
+    if (n != (ssize_t)strlen(value)) { errno = n < 0 ? saved : EIO; return -1; }
+    return 0;
+}
+
+/* Use the kernel-advertised device number, never a guessed ACM major. */
+static int ensure_tty_node(const char *name)
+{
+    char path[256], device[128], node[128], extra;
+    unsigned major_number, minor_number;
+    struct stat st;
+    int fd, saved;
+    ssize_t n;
+    dev_t number;
+    if (strcmp(name, "ttyGS0") && strcmp(name, "tty0")) { errno = EINVAL; return -1; }
+    snprintf(path, sizeof(path), "/sys/class/tty/%s/dev", name);
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) return -1;
+    n = read(fd, device, sizeof(device) - 1);
+    saved = errno;
+    close(fd);
+    if (n <= 0) { errno = n < 0 ? saved : EIO; return -1; }
+    device[n] = 0;
+    device[strcspn(device, "\r\n")] = 0;
+    if (sscanf(device, "%u:%u%c", &major_number, &minor_number, &extra) != 2) {
+        errno = EINVAL; return -1;
+    }
+    number = makedev(major_number, minor_number);
+    if (major(number) != major_number || minor(number) != minor_number) {
+        errno = ERANGE; return -1;
+    }
+    snprintf(node, sizeof(node), "/dev/%s", name);
+    if (!lstat(node, &st)) {
+        if (S_ISCHR(st.st_mode) && st.st_rdev == number) return 0;
+        errno = EEXIST; return -1;
+    }
+    if (errno != ENOENT) return -1;
+    if (!mknod(node, S_IFCHR | 0600, number)) return 0;
+    /* ueventd may win the creation race. Accept only the same real device. */
+    if (errno == EEXIST && !lstat(node, &st) && S_ISCHR(st.st_mode) && st.st_rdev == number)
+        return 0;
+    return -1;
+}
+
+static int setup_stock_acm(void)
+{
+    if (stock_attribute("enable", "0") ||
+        stock_attribute("idVendor", "17EF") ||
+        stock_attribute("idProduct", "7439") ||
+        stock_attribute("f_acm/instances", "1") ||
+        stock_attribute("functions", "acm") ||
+        stock_attribute("bDeviceClass", "02") ||
+        stock_attribute("iSerial", "Z1STOCK20261003") ||
+        stock_attribute("enable", "1")) return -1;
+    acmlog("stock android_usb ACM enabled VID=17EF PID=7439 serial=Z1STOCK20261003", 0);
+    return 0;
+}
+
+static void history_identity(unsigned char *history, uint64_t *end)
+{
+    struct utsname identity;
+    char line[4096], cmdline[2048];
+    int fd, length;
+    ssize_t n;
+    size_t i, count;
+    if (!uname(&identity)) {
+        length = snprintf(line, sizeof(line), "[z1identity] uname=%s %s %s %s\n",
+                          identity.sysname, identity.release, identity.version, identity.machine);
+        if (length > 0) {
+            count = (size_t)length < sizeof(line) ? (size_t)length : sizeof(line) - 1;
+            for (i = 0; i < count; ++i) history[((*end)++) % HISTORY_SIZE] = (unsigned char)line[i];
+        }
+    }
+    fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) return;
+    n = read(fd, cmdline, sizeof(cmdline) - 1);
+    close(fd);
+    if (n <= 0) return;
+    cmdline[n] = 0;
+    cmdline[strcspn(cmdline, "\r\n")] = 0;
+    length = snprintf(line, sizeof(line), "[z1identity] cmdline=%s\n", cmdline);
+    if (length <= 0) return;
+    count = (size_t)length < sizeof(line) ? (size_t)length : sizeof(line) - 1;
+    for (i = 0; i < count; ++i) history[((*end)++) % HISTORY_SIZE] = (unsigned char)line[i];
+}
+
+/* Discover stock partitions from the live kernel, never from guessed pN. */
+#ifndef STOCK_DUMCHAR_INFO
+#define STOCK_DUMCHAR_INFO "/proc/dumchar_info"
+#endif
+#ifndef STOCK_BLOCK_SYSFS
+#define STOCK_BLOCK_SYSFS "/sys/class/block"
+#endif
+#ifndef STOCK_BLOCK_DEV
+#define STOCK_BLOCK_DEV "/dev/block"
+#endif
+#define STOCK_PART_LIMIT 65536U
+struct stock_partition {
+    const char *name, *alias;
+    char node[48];
+    uint64_t size, start;
+    int found;
+};
+
+static int bounded_text(const char *path, char *text, size_t capacity)
+{
+    size_t used = 0;
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    for (;;) {
+        char extra;
+        ssize_t n;
+        if (used == capacity - 1) {
+            n = read(fd, &extra, 1);
+            if (n > 0) { close(fd); errno = EFBIG; return -1; }
+        } else n = read(fd, text + used, capacity - 1 - used);
+        if (n < 0) { int saved = errno; close(fd); errno = saved; return -1; }
+        if (!n) break;
+        used += (size_t)n;
+    }
+    close(fd);
+    text[used] = 0;
+    return 0;
+}
+
+static int stock_number(const char *text, int base, uint64_t *value)
+{
+    const char *digits = text;
+    char *end;
+    unsigned long long number;
+    if (base == 16) {
+        if (strncmp(text, "0x", 2)) { errno = EINVAL; return -1; }
+        digits += 2;
+    }
+    if (!*digits || strspn(digits, base == 16 ? "0123456789abcdefABCDEF" : "0123456789") != strlen(digits)) {
+        errno = EINVAL; return -1;
+    }
+    errno = 0;
+    number = strtoull(text, &end, base);
+    if (errno || *end) { if (!errno) errno = EINVAL; return -1; }
+    *value = (uint64_t)number;
+    return 0;
+}
+
+static int stock_parse_partitions(char *text, struct stock_partition part[3])
+{
+    char *save = NULL, *line;
+    int header = 0;
+    while ((line = strtok_r(text, "\n", &save))) {
+        char name[32], size[32], start[32], type[16], map[128], extra[2];
+        int fields;
+        size_t i;
+        text = NULL;
+        if (strspn(line, " \t\r") == strlen(line)) continue;
+        fields = sscanf(line, "%31s %31s %31s %15s %127s %1s", name, size, start, type, map, extra);
+        if (!header) {
+            if (fields != 5 || strcmp(name, "Part_Name") || strcmp(size, "Size") ||
+                strcmp(start, "StartAddr") || strcmp(type, "Type") || strcmp(map, "MapTo")) {
+                errno = EINVAL; return -1;
+            }
+            header = 1;
+            continue;
+        }
+        if (fields < 1) continue;
+        for (i = 0; i < 3; ++i) if (!strcmp(name, part[i].name)) {
+            const char *suffix;
+            if (fields != 5 || part[i].found || strcmp(type, "2") ||
+                strncmp(map, "/dev/block/mmcblk0p", 19)) { errno = EINVAL; return -1; }
+            suffix = map + 19;
+            if (*suffix < '1' || *suffix > '9' || strspn(suffix, "0123456789") != strlen(suffix) ||
+                strlen(suffix) > 10 || strlen(map + 11) >= sizeof(part[i].node)) {
+                errno = EINVAL; return -1;
+            }
+            if (stock_number(size, 16, &part[i].size) || stock_number(start, 16, &part[i].start) ||
+                !part[i].size || part[i].size % 512 || part[i].start % 512) {
+                errno = EINVAL; return -1;
+            }
+            snprintf(part[i].node, sizeof(part[i].node), "%s", map + 11);
+            part[i].found = 1;
+        }
+    }
+    if (!header || !part[0].found || !part[1].found || !part[2].found) { errno = EINVAL; return -1; }
+    if (!strcmp(part[0].node, part[1].node) || !strcmp(part[0].node, part[2].node) ||
+        !strcmp(part[1].node, part[2].node)) { errno = EINVAL; return -1; }
+    return 0;
+}
+
+static int stock_sys_number(const char *node, const char *attribute_name, uint64_t *value)
+{
+    char path[256], text[128];
+    snprintf(path, sizeof(path), STOCK_BLOCK_SYSFS "/%s/%s", node, attribute_name);
+    if (bounded_text(path, text, sizeof(text))) return -1;
+    text[strcspn(text, "\r\n")] = 0;
+    return stock_number(text, 10, value);
+}
+
+static uint32_t stock_le32(const unsigned char *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static int stock_validate_partition(const struct stock_partition *part)
+{
+    char path[256], text[128], extra;
+    uint64_t sectors, start, bytes, blocks;
+    unsigned major_number, minor_number;
+    unsigned char superblock[2048];
+    uint32_t block_shift, incompat;
+    struct stat st;
+    dev_t device;
+    int fd, saved;
+    ssize_t n;
+    if (stock_sys_number(part->node, "size", &sectors) || stock_sys_number(part->node, "start", &start)) return -1;
+    if (sectors > UINT64_MAX / 512 || start > UINT64_MAX / 512) { errno = ERANGE; return -1; }
+    bytes = sectors * 512;
+    logmsg("stock partition %s MapTo=%s advertised_size=%llu actual_size=%llu advertised_start=%llu actual_start=%llu",
+           part->name, part->node, (unsigned long long)part->size, (unsigned long long)bytes,
+           (unsigned long long)part->start, (unsigned long long)(start * 512));
+    if (bytes < 1024U * 1024U || start * 512 != part->start ||
+        (strcmp(part->name, "usrdata") ? bytes != part->size : bytes > part->size)) {
+        errno = EINVAL; return -1;
+    }
+    if (bytes != part->size)
+        logmsg("usrdata EOD truncation advertised_minus_actual=%llu bytes; verify actual ext4 fits",
+               (unsigned long long)(part->size - bytes));
+    snprintf(path, sizeof(path), STOCK_BLOCK_SYSFS "/%s/dev", part->node);
+    if (bounded_text(path, text, sizeof(text))) return -1;
+    text[strcspn(text, "\r\n")] = 0;
+    if (sscanf(text, "%u:%u%c", &major_number, &minor_number, &extra) != 2) { errno = EINVAL; return -1; }
+    device = makedev(major_number, minor_number);
+    if (major(device) != major_number || minor(device) != minor_number) { errno = ERANGE; return -1; }
+    snprintf(path, sizeof(path), STOCK_BLOCK_DEV "/%s", part->node);
+    if (lstat(path, &st) < 0) {
+        if (errno != ENOENT) return -1;
+        if (mknod(path, S_IFBLK | 0600, device) && errno != EEXIST) return -1;
+        if (lstat(path, &st)) return -1;
+    }
+    if (!S_ISBLK(st.st_mode) || st.st_rdev != device) { errno = EINVAL; return -1; }
+    fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return -1;
+    n = pread(fd, superblock, sizeof(superblock), 0);
+    saved = errno;
+    close(fd);
+    if (n != (ssize_t)sizeof(superblock)) { errno = n < 0 ? saved : EIO; return -1; }
+    if (superblock[1080] != 0x53 || superblock[1081] != 0xef) { errno = EINVAL; return -1; }
+    block_shift = stock_le32(superblock + 1048);
+    incompat = stock_le32(superblock + 1120);
+    blocks = stock_le32(superblock + 1028);
+    if (incompat & 0x80U) blocks |= (uint64_t)stock_le32(superblock + 1360) << 32;
+    if (block_shift > 2 || !blocks || blocks > bytes / (1024U << block_shift)) { errno = EINVAL; return -1; }
+    logmsg("stock %s dev=%u:%u ext4_blocks=%llu blocksize=%u fits=true",
+           part->name, major_number, minor_number, (unsigned long long)blocks, 1024U << block_shift);
+    return 0;
+}
+
+static int stock_partitions_worker(void)
+{
+    static char table[STOCK_PART_LIMIT + 1];
+    struct stock_partition part[3] = {
+        { .name = "android", .alias = "z1-stock-system" },
+        { .name = "cache", .alias = "z1-stock-cache" },
+        { .name = "usrdata", .alias = "z1-stock-data" }
+    };
+    int created[3] = {0, 0, 0};
+    size_t i;
+    if (folder(STOCK_BLOCK_DEV) || bounded_text(STOCK_DUMCHAR_INFO, table, sizeof(table)) ||
+        stock_parse_partitions(table, part)) {
+        int saved = errno;
+        logmsg("stock partition schema/read rejected errno=%d; no fallback", saved);
+        errno = saved; return 1;
+    }
+    for (i = 0; i < 3; ++i) if (stock_validate_partition(&part[i])) {
+        int saved = errno;
+        logmsg("stock partition %s rejected errno=%d; no aliases mounted", part[i].name, saved);
+        errno = saved; return 1;
+    }
+    for (i = 0; i < 3; ++i) {
+        char alias[256], target[256], current[256];
+        struct stat st;
+        ssize_t n;
+        snprintf(alias, sizeof(alias), STOCK_BLOCK_DEV "/%s", part[i].alias);
+        snprintf(target, sizeof(target), STOCK_BLOCK_DEV "/%s", part[i].node);
+        if (!lstat(alias, &st)) {
+            n = S_ISLNK(st.st_mode) ? readlink(alias, current, sizeof(current) - 1) : -1;
+            if (n >= 0) current[n] = 0;
+            if (n < 0 || strcmp(current, target)) { errno = EEXIST; break; }
+        } else if (errno != ENOENT || symlink(target, alias)) break;
+        else created[i] = 1;
+    }
+    if (i != 3) {
+        int saved = errno;
+        for (i = 0; i < 3; ++i) if (created[i]) {
+            char alias[256]; snprintf(alias, sizeof(alias), STOCK_BLOCK_DEV "/%s", part[i].alias);
+            (void)unlink(alias);
+        }
+        logmsg("stock alias creation rejected errno=%d; removed new aliases", saved);
+        errno = saved; return 1;
+    }
+    logmsg("stock partition aliases validated: system/cache/data; no formatting or guessed pN");
+    return 0;
+}
+
+/* MMC rescan may register sysfs after fs actions start. Retry registration
+ * errors only; malformed tables, geometry and filesystem mismatches fail fast. */
+static int stock_partitions_retry(void)
+{
+    uint64_t deadline = monotonic_ms() + 4000U;
+    unsigned attempts = 0;
+    for (;;) {
+        int saved;
+        ++attempts;
+        if (!stock_partitions_worker()) return 0;
+        saved = errno;
+        if (saved != ENOENT && saved != ENODEV && saved != ENXIO && saved != EAGAIN) {
+            errno = saved; return 1;
+        }
+        if (monotonic_ms() >= deadline) {
+            logmsg("stock MMC registration deadline reached attempts=%u errno=%d", attempts, saved);
+            errno = saved; return 1;
+        }
+        logmsg("stock MMC not registered yet attempt=%u errno=%d; bounded retry", attempts, saved);
+        (void)poll(NULL, 0, 100);
+        if (monotonic_ms() >= deadline) { errno = saved; return 1; }
+    }
+}
+
+static int stock_partitions(void)
+{
+    uint64_t deadline = monotonic_ms() + 5000U;
+    int status = 0;
+    pid_t child = fork();
+    if (child < 0) { logmsg("stock partition fork errno=%d", errno); return 1; }
+    if (!child) _exit(stock_partitions_retry());
+    for (;;) {
+        pid_t result = waitpid(child, &status, WNOHANG);
+        if (result == child) return WIFEXITED(status) && !WEXITSTATUS(status) ? 0 : 1;
+        if (result < 0 && errno != EINTR) { (void)kill(child, SIGKILL); return 1; }
+        if (monotonic_ms() >= deadline) {
+            (void)kill(child, SIGKILL);
+            (void)waitpid(child, &status, WNOHANG);
+            logmsg("stock partition deadline exceeded; no fallback"); return 1;
+        }
+        (void)poll(NULL, 0, 20);
+    }
+}
+
+/* No framebuffer reinitialization and no KD_TEXT restoration on exit. */
+static int graphics_mode(void)
+{
+    uint64_t deadline = monotonic_ms() + 5000U;
+    int fd = -1, mode = -1, error = ENODEV;
+    do {
+        if (!ensure_tty_node("tty0")) {
+            fd = open("/dev/tty0", O_RDWR | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+            if (fd >= 0) break;
+        }
+        error = errno;
+        (void)poll(NULL, 0, 100);
+    } while (monotonic_ms() < deadline);
+    if (fd < 0) { acmlog("KD_GRAPHICS unavailable: no usable VT tty0", error); return 1; }
+    /* Isolate even a wedged console-driver ioctl from Android init's caller. */
+    {
+        pid_t child = fork();
+        int status = 0;
+        if (child < 0) { error = errno; close(fd); acmlog("KD_GRAPHICS fork failed", error); return 1; }
+        if (!child) {
+            if (ioctl(fd, KDSETMODE, KD_GRAPHICS) < 0 || ioctl(fd, KDGETMODE, &mode) < 0) {
+                error = errno;
+                close(fd);
+                acmlog("KD_GRAPHICS ioctl failed", error);
+                _exit(1);
+            }
+            close(fd);
+            if (mode != KD_GRAPHICS) { acmlog("KD_GRAPHICS verification failed", EIO); _exit(1); }
+            acmlog("KD_GRAPHICS verified; fbcon text suppressed, framebuffer retained", 0);
+            _exit(0);
+        }
+        close(fd);
+        deadline = monotonic_ms() + 2000U;
+        for (;;) {
+            pid_t result = waitpid(child, &status, WNOHANG);
+            if (result == child) return WIFEXITED(status) && !WEXITSTATUS(status) ? 0 : 1;
+            if (result < 0 && errno != EINTR) {
+                error = errno; (void)kill(child, SIGKILL);
+                acmlog("KD_GRAPHICS waitpid failed", error); return 1;
+            }
+            if (monotonic_ms() >= deadline) {
+                (void)kill(child, SIGKILL);
+                /* Never block on a driver stuck in uninterruptible sleep. */
+                (void)waitpid(child, &status, WNOHANG);
+                acmlog("KD_GRAPHICS ioctl child timed out", ETIMEDOUT);
+                return 1;
+            }
+            (void)poll(NULL, 0, 20);
+        }
+    }
+}
+
+static int acm_main(int stock)
 {
     static unsigned char history[HISTORY_SIZE];
     char record[8192];
@@ -547,10 +973,16 @@ static int acm_main(void)
     size_t warning_size = 0, warning_sent = 0;
     uint64_t warning_target = 0;
     unsigned retry = 0;
+    uint64_t identity_deadline = 0;
+    if (stock) { stock_history = history; stock_history_end = &end; }
     acmlog("starting independent ramdisk ACM log relay; send R to replay", 0);
     for (;;) {
         unsigned reads;
         struct pollfd waitfd;
+        if (monotonic_ms() >= identity_deadline) {
+            history_identity(history, &end);
+            identity_deadline = monotonic_ms() + 60000U;
+        }
         if (status_child > 0) {
             int status;
             if (waitpid(status_child, &status, WNOHANG) == status_child) {
@@ -580,8 +1012,8 @@ static int acm_main(void)
                 stream = open(DIAG_FIFO, O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
         }
         if (kfd < 0) {
-            kfd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-            if (kfd >= 0 && lseek(kfd, 0, SEEK_SET) < 0) acmlog("kmsg replay seek", errno);
+            kfd = open(stock ? "/proc/kmsg" : "/dev/kmsg", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+            if (!stock && kfd >= 0 && lseek(kfd, 0, SEEK_SET) < 0) acmlog("kmsg replay seek", errno);
         }
         if (kfd >= 0) for (reads = 0; reads < 256; ++reads) {
             ssize_t n = read(kfd, record, sizeof(record));
@@ -600,17 +1032,20 @@ static int acm_main(void)
             for (i = 0; i < (size_t)n; ++i) history[(end++) % HISTORY_SIZE] = (unsigned char)record[i];
         }
         if (!configured && !retry) {
-            if (!setup_acm()) { configured = 1; previous_error = -1; }
+            if (!(stock ? setup_stock_acm() : setup_acm())) { configured = 1; previous_error = -1; }
             else {
                 int error = errno;
-                if (error != previous_error) acmlog("waiting for configfs/free MUSB UDC", error);
+                if (error != previous_error) acmlog(stock ? "waiting for stock android_usb ACM" : "waiting for configfs/free MUSB UDC", error);
                 previous_error = error;
                 retry = 25; /* 5 seconds, no retry spin. */
             }
         }
         if (retry) --retry;
         if (configured && tty < 0 && !retry) {
-            tty = open("/dev/ttyGS0", O_RDWR | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+            if (stock && ensure_tty_node("ttyGS0") < 0) {
+                acmlog("waiting for stock ttyGS0 sysfs device number", errno);
+                retry = 5;
+            } else tty = open("/dev/ttyGS0", O_RDWR | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
             if (tty >= 0) {
                 struct termios term;
                 if (!tcgetattr(tty, &term)) {
@@ -713,7 +1148,7 @@ static int acm_main(void)
                 retry = 5;
             }
         }
-        /* Always yield even under sustained printk; no /proc/kmsg consumption. */
+        /* Always yield; stock alone consumes /proc/kmsg, modern uses /dev/kmsg. */
         waitfd.fd = -1;
         waitfd.events = 0;
         (void)poll(&waitfd, 0, 200);
@@ -778,7 +1213,10 @@ int main(int argc, char **argv)
     };
     size_t i;
     logfd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
-    if (argc == 2 && !strcmp(argv[1], "--acm")) return acm_main();
+    if (argc == 2 && !strcmp(argv[1], "--acm")) return acm_main(0);
+    if (argc == 2 && !strcmp(argv[1], "--acm-stock")) return acm_main(1);
+    if (argc == 2 && !strcmp(argv[1], "--stock-partitions")) return stock_partitions();
+    if (argc == 2 && !strcmp(argv[1], "--graphics-mode")) return graphics_mode();
     if (argc == 2 && !strcmp(argv[1], "--logcat")) return logcat_main();
     if (argc != 1) return 2;
     logmsg("BEGIN read-only boot evidence pid=%ld", (long)getpid());

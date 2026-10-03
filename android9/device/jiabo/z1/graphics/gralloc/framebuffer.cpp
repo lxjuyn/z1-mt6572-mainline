@@ -24,6 +24,7 @@
 
 #include <cutils/ashmem.h>
 #include <cutils/atomic.h>
+#include <cutils/properties.h>
 #include <log/log.h>
 
 #include <hardware/gralloc.h>
@@ -97,7 +98,8 @@ static int fb_post(struct framebuffer_device_t* dev, buffer_handle_t buffer)
     private_module_t* m = reinterpret_cast<private_module_t*>(
             dev->common.module);
 
-    if (hnd->flags & private_handle_t::PRIV_FLAGS_FRAMEBUFFER) {
+    const bool stock = property_get_bool("ro.z1.stock_kernel", false);
+    if (!stock && (hnd->flags & private_handle_t::PRIV_FLAGS_FRAMEBUFFER)) {
         const size_t offset = hnd->base - m->framebuffer->base;
         m->info.activate = FB_ACTIVATE_VBL;
         m->info.yoffset = offset / m->finfo.line_length;
@@ -130,8 +132,9 @@ static int fb_post(struct framebuffer_device_t* dev, buffer_handle_t buffer)
             return err;
         }
 
-        err = z1_copy_rgb565(fb_vaddr, m->framebuffer->size,
-                m->finfo.line_length, buffer_vaddr, hnd->size - hnd->offset,
+        err = z1_copy_pixels(fb_vaddr, m->framebuffer->size,
+                m->finfo.line_length, m->framebuffer->format,
+                buffer_vaddr, hnd->size - hnd->offset,
                 hnd->width, hnd->height, hnd->stride, hnd->format,
                 m->info.xres, m->info.yres);
         if (err) ALOGE("invalid framebuffer post: format=%d size=%d stride=%d",
@@ -140,6 +143,19 @@ static int fb_post(struct framebuffer_device_t* dev, buffer_handle_t buffer)
         m->base.unlock(&m->base, buffer); 
         m->base.unlock(&m->base, m->framebuffer); 
         if (err) return err;
+        if (stock) {
+            // Stock MTK fbdev submits the copied front buffer on pan-display.
+            // Preserve the driver's mode/timing; only select the first screen.
+            struct fb_var_screeninfo pan = m->info;
+            pan.xoffset = 0;
+            pan.yoffset = 0;
+            pan.activate = FB_ACTIVATE_NOW;
+            if (ioctl(m->framebuffer->fd, FBIOPAN_DISPLAY, &pan) == -1) {
+                const int error = -errno;
+                ALOGE("stock FBIOPAN_DISPLAY refresh failed: %s", strerror(errno));
+                return error;
+            }
+        }
     }
     
     return 0;
@@ -185,50 +201,78 @@ int mapFrameBufferLocked(struct private_module_t* module)
         return err;
     }
 
-    info.reserved[0] = 0;
-    info.reserved[1] = 0;
-    info.reserved[2] = 0;
-    info.xoffset = 0;
-    info.yoffset = 0;
-    info.activate = FB_ACTIVATE_NOW;
+    const bool stock = property_get_bool("ro.z1.stock_kernel", false);
+    uint32_t flags = 0;
+    if (!stock) {
+        info.reserved[0] = 0;
+        info.reserved[1] = 0;
+        info.reserved[2] = 0;
+        info.xoffset = 0;
+        info.yoffset = 0;
+        info.activate = FB_ACTIVATE_NOW;
 
-    /*
-     * Request NUM_BUFFERS screens (at lest 2 for page flipping)
-     */
-    info.yres_virtual = info.yres * NUM_BUFFERS;
+        /*
+         * Request NUM_BUFFERS screens (at lest 2 for page flipping)
+         */
+        info.yres_virtual = info.yres * NUM_BUFFERS;
 
 
-    uint32_t flags = PAGE_FLIP;
+        flags = PAGE_FLIP;
 #if USE_PAN_DISPLAY
-    if (ioctl(fd, FBIOPAN_DISPLAY, &info) == -1) {
-        ALOGW("FBIOPAN_DISPLAY failed, page flipping not supported");
+        if (ioctl(fd, FBIOPAN_DISPLAY, &info) == -1) {
+            ALOGW("FBIOPAN_DISPLAY failed, page flipping not supported");
 #else
-    if (ioctl(fd, FBIOPUT_VSCREENINFO, &info) == -1) {
-        ALOGW("FBIOPUT_VSCREENINFO failed, page flipping not supported");
+        if (ioctl(fd, FBIOPUT_VSCREENINFO, &info) == -1) {
+            ALOGW("FBIOPUT_VSCREENINFO failed, page flipping not supported");
 #endif
-        info.yres_virtual = info.yres;
-        flags &= ~PAGE_FLIP;
-    }
+            info.yres_virtual = info.yres;
+            flags &= ~PAGE_FLIP;
+        }
 
-    if (info.yres_virtual < info.yres * 2) {
-        // we need at least 2 for page-flipping
-        info.yres_virtual = info.yres;
-        flags &= ~PAGE_FLIP;
-        ALOGW("page flipping not supported (yres_virtual=%d, requested=%d)",
-                info.yres_virtual, info.yres*2);
-    }
+        if (info.yres_virtual < info.yres * 2) {
+            // we need at least 2 for page-flipping
+            info.yres_virtual = info.yres;
+            flags &= ~PAGE_FLIP;
+            ALOGW("page flipping not supported (yres_virtual=%d, requested=%d)",
+                    info.yres_virtual, info.yres*2);
+        }
 
-    if (ioctl(fd, FBIOGET_VSCREENINFO, &info) == -1) {
-        int err = -errno;
-        close(fd);
-        return err;
+        if (ioctl(fd, FBIOGET_VSCREENINFO, &info) == -1) {
+            int err = -errno;
+            close(fd);
+            return err;
+        }
+    } // Stock must not request a new physical or virtual mode.
+    int framebufferFormat = 0;
+    if (!info.nonstd && !info.grayscale &&
+            !info.red.msb_right && !info.green.msb_right &&
+            !info.blue.msb_right && !info.transp.msb_right) {
+        if (info.bits_per_pixel == 16 &&
+                info.red.offset == 11 && info.red.length == 5 &&
+                info.green.offset == 5 && info.green.length == 6 &&
+                info.blue.offset == 0 && info.blue.length == 5 &&
+                info.transp.length == 0) {
+            framebufferFormat = HAL_PIXEL_FORMAT_RGB_565;
+        } else if (stock && info.bits_per_pixel == 32 &&
+                info.red.length == 8 && info.green.length == 8 &&
+                info.blue.length == 8 && info.green.offset == 8 &&
+                (info.transp.length == 0 ||
+                 (info.transp.length == 8 && info.transp.offset == 24))) {
+            if (info.red.offset == 0 && info.blue.offset == 16)
+                framebufferFormat = info.transp.length == 8 ?
+                        HAL_PIXEL_FORMAT_RGBA_8888 : HAL_PIXEL_FORMAT_RGBX_8888;
+            else if (info.red.offset == 16 && info.blue.offset == 0)
+                framebufferFormat = HAL_PIXEL_FORMAT_BGRA_8888;
+        }
     }
-    if (info.xres != 240 || info.yres != 320 || info.bits_per_pixel != 16 ||
-            info.red.offset != 11 || info.red.length != 5 ||
-            info.green.offset != 5 || info.green.length != 6 ||
-            info.blue.offset != 0 || info.blue.length != 5) {
-        ALOGE("unexpected Z1 fb geometry/format: %ux%u %u bpp",
-              info.xres, info.yres, info.bits_per_pixel);
+    if (info.xres != 240 || info.yres != 320 || !framebufferFormat ||
+            info.xres_virtual < info.xres || info.yres_virtual < info.yres) {
+        ALOGE("unexpected Z1 fb: %ux%u virtual=%ux%u %ubpp "
+              "r=%u:%u g=%u:%u b=%u:%u a=%u:%u stock=%d",
+              info.xres, info.yres, info.xres_virtual, info.yres_virtual,
+              info.bits_per_pixel, info.red.offset, info.red.length,
+              info.green.offset, info.green.length, info.blue.offset,
+              info.blue.length, info.transp.offset, info.transp.length, stock);
         close(fd);
         return -EINVAL;
     }
@@ -249,15 +293,16 @@ int mapFrameBufferLocked(struct private_module_t* module)
         refreshRate = 60*1000;  // 60 Hz
     }
 
+    // Derive DPI without rewriting the driver's mode passed to stock pan.
+    float widthMm = info.width;
+    float heightMm = info.height;
     if (int(info.width) <= 0 || int(info.height) <= 0) {
-        // the driver doesn't return that information
-        // default to 160 dpi
-        info.width  = ((info.xres * 25.4f)/160.0f + 0.5f);
-        info.height = ((info.yres * 25.4f)/160.0f + 0.5f);
+        widthMm = ((info.xres * 25.4f)/160.0f + 0.5f);
+        heightMm = ((info.yres * 25.4f)/160.0f + 0.5f);
     }
 
-    float xdpi = (info.xres * 25.4f) / info.width;
-    float ydpi = (info.yres * 25.4f) / info.height;
+    float xdpi = (info.xres * 25.4f) / widthMm;
+    float ydpi = (info.yres * 25.4f) / heightMm;
     float fps  = refreshRate / 1000.0f;
 
     ALOGI(   "using (fd=%d)\n"
@@ -297,9 +342,14 @@ int mapFrameBufferLocked(struct private_module_t* module)
         return err;
     }
 
-    if (finfo.line_length < info.xres * 2 ||
+    const unsigned bytesPerPixel = info.bits_per_pixel / 8;
+    if (finfo.type != FB_TYPE_PACKED_PIXELS || finfo.visual != FB_VISUAL_TRUECOLOR ||
+            finfo.line_length < info.xres * bytesPerPixel ||
+            finfo.line_length % bytesPerPixel != 0 ||
             uint64_t(finfo.smem_len) < uint64_t(finfo.line_length) * info.yres_virtual ||
             uint64_t(finfo.line_length) * info.yres_virtual > INT_MAX - PAGE_SIZE) {
+        ALOGE("invalid Z1 fb storage: type=%u visual=%u stride=%u smem=%u",
+              finfo.type, finfo.visual, finfo.line_length, finfo.smem_len);
         close(fd);
         return -EINVAL;
     }
@@ -337,8 +387,8 @@ int mapFrameBufferLocked(struct private_module_t* module)
     module->framebuffer->base = intptr_t(vaddr);
     module->framebuffer->width = info.xres;
     module->framebuffer->height = info.yres;
-    module->framebuffer->stride = finfo.line_length / 2;
-    module->framebuffer->format = HAL_PIXEL_FORMAT_RGB_565;
+    module->framebuffer->stride = finfo.line_length / bytesPerPixel;
+    module->framebuffer->format = framebufferFormat;
     memset(vaddr, 0, finfo.line_length * info.yres_virtual);
     return 0;
 }
@@ -385,9 +435,7 @@ int fb_device_open(hw_module_t const* module, const char* name,
         status = mapFrameBuffer(m);
         if (status >= 0) {
             int stride = m->finfo.line_length / (m->info.bits_per_pixel >> 3);
-            int format = (m->info.bits_per_pixel == 32)
-                         ? (m->info.red.offset ? HAL_PIXEL_FORMAT_BGRA_8888 : HAL_PIXEL_FORMAT_RGBX_8888)
-                         : HAL_PIXEL_FORMAT_RGB_565;
+            int format = m->framebuffer->format;
             const_cast<uint32_t&>(dev->device.flags) = 0;
             const_cast<uint32_t&>(dev->device.width) = m->info.xres;
             const_cast<uint32_t&>(dev->device.height) = m->info.yres;

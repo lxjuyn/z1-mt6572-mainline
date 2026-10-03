@@ -6,23 +6,33 @@ PRODUCT_SHIPPING_API_LEVEL := 19
 
 # Android 9 uses a classic root ramdisk on this device. The kernel's DT
 # bootargs must provide androidboot.hardware=z1 so init imports init.z1.rc.
+ifeq ($(Z1_KERNEL_VARIANT),stock)
+PRODUCT_COPY_FILES += \
+    $(DEVICE_PATH)/stock/init.z1.rc:root/init.z1.rc \
+    $(DEVICE_PATH)/stock/fstab.z1:root/fstab.z1 \
+    $(DEVICE_PATH)/stock/ueventd.z1.rc:root/ueventd.z1.rc
+PRODUCT_PROPERTY_OVERRIDES += ro.z1.stock_kernel=true ro.logd.kernel=false ro.hardware.gralloc=z1 ro.hardware.hwcomposer=z1
+PRODUCT_PACKAGES += android.hardware.configstore@1.1-impl.z1stock
+else
 PRODUCT_COPY_FILES += \
     $(DEVICE_PATH)/rootdir/init.z1.rc:root/init.z1.rc \
     $(DEVICE_PATH)/rootdir/fstab.z1:root/fstab.z1 \
     $(DEVICE_PATH)/rootdir/init.z1.network.rc:root/init.z1.network.rc \
     $(DEVICE_PATH)/rootdir/z1_usb_setup.sh:system/bin/z1_usb_setup.sh
+endif
 
 # Rebuilt module files and dependency order are produced together by
 # tools/z1_stage_network_modules.py. Load them before netd starts.
+ifneq ($(Z1_KERNEL_VARIANT),stock)
 PRODUCT_COPY_FILES += $(foreach module,$(wildcard $(DEVICE_PATH)/network/modules/*.ko),\
     $(module):system/lib/modules/z1-network/$(notdir $(module)))
+endif
 
 PRODUCT_PROPERTY_OVERRIDES += \
     ro.config.low_ram=true \
     ro.sf.lcd_density=160 \
     ro.hardware.egl=swiftshader \
-    persist.sys.usb.config=adb \
-    ro.vold.z1_fuse=true \
+        ro.vold.z1_fuse=true \
     ro.sys.sdcardfs=false
 
 # FB_SIMPLE exposes Z1's 240x320 RGB565 display through /dev/fb0. The
@@ -70,3 +80,9 @@ PRODUCT_CHARACTERISTICS := nosdcard
 # Mainline has FUSE, not Android sdcardfs/esdfs. The replacement daemon retains
 # three permission views and per-package/multi-user access checks.
 PRODUCT_PACKAGES += sdcard.z1_fuse
+
+ifeq ($(Z1_KERNEL_VARIANT),stock)
+PRODUCT_PROPERTY_OVERRIDES += persist.sys.usb.config=acm
+else
+PRODUCT_PROPERTY_OVERRIDES += persist.sys.usb.config=adb
+endif

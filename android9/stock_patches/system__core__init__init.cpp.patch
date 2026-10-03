@@ -1,0 +1,20 @@
+--- a/system/core/init/init.cpp
++++ b/system/core/init/init.cpp
+@@ -613,6 +613,17 @@
+ 
+         LOG(INFO) << "init first stage started!";
+ 
++        // Start diagnostic USB before loading policy, so policy failures are
++        // observable with the original kernel's legacy android_usb gadget.
++        if (access("/z1_stock_kernel", F_OK) == 0) {
++            pid_t logger_pid = fork();
++            if (logger_pid == 0) {
++                execl("/z1_bootdiag", "z1_bootdiag", "--acm-stock", nullptr);
++                _exit(127);
++            }
++            if (logger_pid < 0) PLOG(ERROR) << "Cannot fork stock diagnostic logger";
++        }
++
+         if (!DoFirstStageMount()) {
+             LOG(FATAL) << "Failed to mount required partitions early ...";
+         }

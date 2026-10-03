@@ -13,7 +13,7 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def identify():
+def identify(expected=('0e8d', '2006', 'Z1DIAG20261001')):
     for node in sorted(Path('/sys/class/tty').glob('ttyACM*')):
         device = (node / 'device').resolve()
         for parent in (device, *device.parents):
@@ -23,7 +23,7 @@ def identify():
                 serial = (parent / 'serial').read_text().strip()
             except OSError:
                 continue
-            if (vendor, product, serial) == ('0e8d', '2006', 'Z1DIAG20261001'):
+            if (vendor.lower(), product.lower(), serial) == expected:
                 return Path('/dev') / node.name
     return None
 
@@ -36,13 +36,15 @@ def main():
                         help='request read-only tombstone export halfway through capture (at most 60s)')
     parser.add_argument('--status', action='store_true',
                         help='request bounded read-only boot/service/storage status every 60s (M6+)')
+    parser.add_argument('--stock', action='store_true', help='capture exact stock S1 legacy ACM identity')
     args = parser.parse_args()
     if args.seconds <= 0 or args.wait < 0:
         parser.error('seconds must be positive and wait must be nonnegative')
     deadline = time.monotonic() + args.wait
-    print('Waiting for Z1 0e8d:2006 serial Z1DIAG20261001; attach USB after kernel starts.', flush=True)
+    expected = ('17ef', '7439', 'Z1STOCK20261003') if args.stock else ('0e8d', '2006', 'Z1DIAG20261001')
+    print(f'Waiting for Z1 {expected[0]}:{expected[1]} serial {expected[2]}; attach USB after kernel starts.', flush=True)
     while True:
-        port = identify()
+        port = identify(expected)
         if port:
             break
         if time.monotonic() >= deadline:

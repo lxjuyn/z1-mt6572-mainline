@@ -103,14 +103,29 @@ def verify(args):
         defaults = files['default.prop'][1].decode()
         require('ro.zygote=zygote32' in defaults.splitlines(), 'unsupported or missing ro.zygote')
         init = files['init.rc'][1].decode()
-        expected_imports = ('/init.environ.rc', '/init.usb.rc', '/init.${ro.hardware}.rc',
+        board_import = '/init.z1.rc' if args.stock else '/init.${ro.hardware}.rc'
+        expected_imports = ('/init.environ.rc', '/init.usb.rc', board_import,
                             '/init.usb.configfs.rc', '/init.${ro.zygote}.rc')
         for imported in expected_imports:
             require('import ' + imported in init.splitlines(), f'missing init import {imported}')
             expanded = imported.replace('${ro.hardware}', 'z1').replace('${ro.zygote}', 'zygote32')
             require(expanded.lstrip('/') in files, f'missing imported RC {expanded}')
-        require('import /init.z1.network.rc' in files['init.z1.rc'][1].decode().splitlines(),
-                'board network RC not imported')
+        if args.stock:
+            require('z1_stock_kernel' in files, 'stock marker missing')
+            require('import /init.z1.network.rc' not in files['init.z1.rc'][1].decode(),
+                    'stock must not load Linux7 modules')
+            require(b'--graphics-mode' in files['init.z1.rc'][1], 'missing stock graphics takeover')
+            require(b'start hwservicemanager' not in files['init.rc'][1], 'stock starts hwservicemanager')
+            require(b'start vndservicemanager' not in files['init.rc'][1], 'stock starts vndservicemanager')
+            require(b'--stock-partitions' in files['init.z1.rc'][1], 'stock has no live partition resolver')
+            require(b'/dev/block/z1-stock-' in files['fstab.z1'][1], 'stock fstab has no resolved aliases')
+            props = image.get('build.prop').read_text().splitlines()
+            for line in ('ro.z1.stock_kernel=true', 'ro.logd.kernel=false',
+                         'ro.hardware.gralloc=z1', 'ro.hardware.hwcomposer=z1'):
+                require(line in props, 'missing stock property: ' + line)
+        else:
+            require('import /init.z1.network.rc' in files['init.z1.rc'][1].decode().splitlines(),
+                    'board network RC not imported')
         for name, (fields, data) in sorted(files.items()):
             if '/' not in name and name.endswith('.rc'):
                 require(stat.S_ISREG(fields[1]), f'ramdisk RC not regular: {name}')
@@ -122,6 +137,30 @@ def verify(args):
         names = [s['name'] for s in definitions]
         require(len(names) == len(set(names)), 'duplicate service definitions')
         roots = set()
+        if args.stock:
+            for service in definitions:
+                exe = service['executable']
+                unsupported = (service['name'] in ('hwservicemanager', 'vndservicemanager', 'hidl_memory', 'media.codec')
+                               or exe.startswith(('/vendor/bin/hw/', '/system/bin/hw/')))
+                require(not unsupported or ['disabled'] in service['options'],
+                        'stock remote HIDL server is enabled: ' + service['name'])
+            factories = {
+                'android.hardware.graphics.composer@2.1-impl.so': 'IComposer',
+                'android.hardware.graphics.allocator@2.0-impl.so': 'IAllocator',
+                'android.hardware.graphics.mapper@2.0-impl.so': 'IMapper',
+                'android.hardware.audio@2.0-impl.so': 'IDevicesFactory',
+                'android.hardware.audio.effect@2.0-impl.so': 'IEffectsFactory',
+                'android.hardware.keymaster@3.0-impl.so': 'IKeymasterDevice',
+                'android.hardware.configstore@1.1-impl.z1stock.so': 'ISurfaceFlingerConfigs',
+            }
+            report['stock_factories'] = []
+            for filename, interface in factories.items():
+                relative = 'vendor/lib/hw/' + filename
+                path = image.get(relative)
+                symbols = run(['readelf', '--dyn-syms', '--wide', str(path)]).stdout
+                require('HIDL_FETCH_' + interface in symbols, 'missing stock factory: ' + relative)
+                roots.add(relative)
+                report['stock_factories'].append(relative)
         for service in definitions:
             exe = service['executable']
             if exe.startswith(('/system/', '/vendor/')):
@@ -186,7 +225,8 @@ def verify(args):
         manifest = ET.parse(image.get('vendor/etc/vintf/manifest.xml')).getroot()
         configstores = [h for h in manifest.findall('hal') if h.findtext('name') == 'android.hardware.configstore']
         require(len(configstores) == 1 and configstores[0].findtext('version') == '1.1' and
-                configstores[0].findtext('transport') == 'hwbinder', 'configstore image manifest must declare 1.1 hwbinder')
+                configstores[0].findtext('transport') == ('passthrough' if args.stock else 'hwbinder'),
+                'configstore image manifest transport/version mismatch')
         require(any(s['executable'] == '/vendor/bin/hw/android.hardware.configstore@1.1-service'
                     for s in report['services']), 'missing configstore 1.1 executable service')
         report['service_count'] = len(report['services'])
@@ -237,6 +277,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('system', 'system-tree', 'ramdisk', 'report'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--stock', action='store_true', help='verify isolated stock-kernel init profile')
     args = parser.parse_args()
     try:
         report = verify(args)

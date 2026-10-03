@@ -1,0 +1,62 @@
+--- a/frameworks/base/services/core/java/com/android/server/BatteryService.java
++++ b/frameworks/base/services/core/java/com/android/server/BatteryService.java
+@@ -57,6 +57,7 @@
+ import android.os.ShellCallback;
+ import android.os.ShellCommand;
+ import android.os.SystemClock;
++import android.os.SystemProperties;
+ import android.os.Trace;
+ import android.os.UEventObserver;
+ import android.os.UserHandle;
+@@ -193,6 +194,7 @@
+     private ActivityManagerInternal mActivityManagerInternal;
+ 
+     private HealthServiceWrapper mHealthServiceWrapper;
++    private Z1StockBatteryMonitor mStockBatteryMonitor;
+     private HealthHalCallback mHealthHalCallback;
+     private BatteryPropertiesRegistrar mBatteryPropertiesRegistrar;
+     private ArrayDeque<Bundle> mBatteryLevelsEventQueue;
+@@ -285,6 +287,12 @@
+     }
+ 
+     private void registerHealthCallback() {
++        if (SystemProperties.getBoolean("ro.z1.stock_kernel", false)) {
++            Slog.i(TAG, "Z1 stock health: polling real power_supply sysfs without HIDL");
++            mStockBatteryMonitor = new Z1StockBatteryMonitor(this::update);
++            mStockBatteryMonitor.start();
++            return;
++        }
+         traceBegin("HealthInitWrapper");
+         mHealthServiceWrapper = new HealthServiceWrapper();
+         mHealthHalCallback = new HealthHalCallback();
+@@ -1031,6 +1039,9 @@
+         synchronized (mLock) {
+             if (args == null || args.length == 0 || "-a".equals(args[0])) {
+                 pw.println("Current Battery Service state:");
++                if (mStockBatteryMonitor != null) {
++                    mStockBatteryMonitor.dump(pw);
++                }
+                 if (mUpdatesStopped) {
+                     pw.println("  (UPDATES STOPPED -- use 'reset' to restart)");
+                 }
+@@ -1234,6 +1245,9 @@
+         public int getProperty(int id, final BatteryProperty prop) throws RemoteException {
+             traceBegin("HealthGetProperty");
+             try {
++                if (mStockBatteryMonitor != null) {
++                    return mStockBatteryMonitor.getProperty(id, prop);
++                }
+                 IHealth service = mHealthServiceWrapper.getLastService();
+                 if (service == null) throw new RemoteException("no health service");
+                 final MutableInt outResult = new MutableInt(Result.NOT_SUPPORTED);
+@@ -1283,6 +1297,10 @@
+         public void scheduleUpdate() throws RemoteException {
+             traceBegin("HealthScheduleUpdate");
+             try {
++                if (mStockBatteryMonitor != null) {
++                    mStockBatteryMonitor.scheduleUpdate();
++                    return;
++                }
+                 IHealth service = mHealthServiceWrapper.getLastService();
+                 if (service == null) throw new RemoteException("no health service");
+                 service.update();
