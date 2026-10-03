@@ -90,6 +90,11 @@
       "file": "frameworks/base/services/core/java/com/android/server/BatteryService.java",
       "exit": 0,
       "error": ""
+    },
+    {
+      "file": "system/core/init/log.cpp",
+      "exit": 0,
+      "error": ""
     }
   ]
 }

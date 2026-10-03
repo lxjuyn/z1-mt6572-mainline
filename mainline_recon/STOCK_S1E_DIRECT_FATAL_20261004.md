@@ -1,0 +1,2 @@
+# S1E direct fatal capture
+S1D flashed through fastboot successfully but immediately returned to fastboot; no ACM payload. LOG(FATAL) invokes InitAborter directly instead of SIGABRT. S1E adds the bounded 15-second log window before InitAborter calls DoReboot, and writes the actual abort message to /dev/kmsg. No errors skipped; actual Android startup failure remains unknown. Exact stock kernel and all ramdisk entries except init retained. Use unchanged S1 system. init build PASS18s; boot static checks PASS; runtime pending.
