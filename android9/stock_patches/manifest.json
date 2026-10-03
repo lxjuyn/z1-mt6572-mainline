@@ -3,7 +3,7 @@
     "file": "system/core/init/init.cpp",
     "patch": "system__core__init__init.cpp.patch",
     "base_sha256": "a691373d65be4318705255874c11818036080efa7e0c51e8ccfb4e03108ec279",
-    "result_sha256": "3f344b5476d27c5b475f83726af51c97a66aef0d7a107dd24cb45b66327e0ba3"
+    "result_sha256": "ac8821624d729e073fe29c7f9127f7cfa0dd81321318ca5157ea91532d2cd33f"
   },
   {
     "file": "system/core/init/selinux.cpp",
