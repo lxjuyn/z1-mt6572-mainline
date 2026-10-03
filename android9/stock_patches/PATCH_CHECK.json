@@ -100,6 +100,26 @@
       "file": "system/core/init/security.cpp",
       "exit": 0,
       "error": ""
+    },
+    {
+      "file": "frameworks/native/services/surfaceflinger/RenderEngine/RenderEngine.cpp",
+      "exit": 0,
+      "error": ""
+    },
+    {
+      "file": "hardware/interfaces/configstore/1.1/default/stock_factory_v1_0.cpp",
+      "exit": 0,
+      "error": ""
+    },
+    {
+      "file": "system/connectivity/wificond/main.cpp",
+      "exit": 0,
+      "error": ""
+    },
+    {
+      "file": "system/connectivity/wificond/scanning/offload/offload_scan_manager.cpp",
+      "exit": 0,
+      "error": ""
     }
   ]
 }

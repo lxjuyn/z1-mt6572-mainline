@@ -12,7 +12,9 @@ PRODUCT_COPY_FILES += \
     $(DEVICE_PATH)/stock/fstab.z1:root/fstab.z1 \
     $(DEVICE_PATH)/stock/ueventd.z1.rc:root/ueventd.z1.rc
 PRODUCT_PROPERTY_OVERRIDES += ro.z1.stock_kernel=true ro.logd.kernel=false ro.hardware.gralloc=z1 ro.hardware.hwcomposer=z1
-PRODUCT_PACKAGES += android.hardware.configstore@1.1-impl.z1stock
+PRODUCT_PACKAGES += \
+    android.hardware.configstore@1.0-impl.z1stock \
+    android.hardware.configstore@1.1-impl.z1stock
 else
 PRODUCT_COPY_FILES += \
     $(DEVICE_PATH)/rootdir/init.z1.rc:root/init.z1.rc \
