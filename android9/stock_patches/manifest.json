@@ -103,7 +103,7 @@
     "file": "frameworks/base/services/core/java/com/android/server/BatteryService.java",
     "patch": "frameworks__base__services__core__java__com__android__server__BatteryService.java.patch",
     "base_sha256": "86609213e6e8e923ce9389e84ce864a521d02cce73f1cb8732e1c8eac81112ab",
-    "result_sha256": "2361dec5e92ecc8f385313fdc597fdccc44f486b500e57fc165e1c00959ea4ae"
+    "result_sha256": "1686583f482e03dbe37e7a2c9f84d3a3eb2812c0df00406b99daea7d0904fc76"
   },
   {
     "file": "system/core/init/log.cpp",
