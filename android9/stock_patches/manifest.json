@@ -3,7 +3,7 @@
     "file": "system/core/init/init.cpp",
     "patch": "system__core__init__init.cpp.patch",
     "base_sha256": "a691373d65be4318705255874c11818036080efa7e0c51e8ccfb4e03108ec279",
-    "result_sha256": "ac8821624d729e073fe29c7f9127f7cfa0dd81321318ca5157ea91532d2cd33f"
+    "result_sha256": "34c01edbed07f998e840c254c2ff3fe3134378866b5a4f1c59e2b98ac797b20e"
   },
   {
     "file": "system/core/init/selinux.cpp",
@@ -110,5 +110,11 @@
     "patch": "system__core__init__log.cpp.patch",
     "base_sha256": "5d499d8ae39490bbfeb24b4218706c0ebc663a6e97a9f97733a5f0d8dadf79d1",
     "result_sha256": "702cb5a0a080d6b6f9c08608b58aab766b67294b8df6d2cfb3346e06ecb5cfb4"
+  },
+  {
+    "file": "system/core/init/security.cpp",
+    "patch": "system__core__init__security.cpp.patch",
+    "base_sha256": "c7cea4b7dadcccb726473181bfb1e43ce968c461828c0d480f772ca09c901d53",
+    "result_sha256": "4381ccb6cc50660552f8d4054071c79718a35afbd6387621f249b2cc273edafd"
   }
 ]

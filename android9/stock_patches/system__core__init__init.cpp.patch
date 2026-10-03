@@ -31,10 +31,26 @@
  
  static char qemu[32];
  
-@@ -474,6 +482,42 @@
+@@ -387,6 +395,13 @@
+     };
+     for (size_t i = 0; i < arraysize(prop_map); i++) {
+         std::string value = GetProperty(prop_map[i].src_prop, "");
++        // The stock ATAG/LK boot path does not supply androidboot.hardware.
++        // Override only its empty fallback, never an explicit boot property.
++        if (stock_debug_kernel && value.empty() &&
++            !strcmp(prop_map[i].src_prop, "ro.boot.hardware")) {
++            value = "z1";
++            LOG(INFO) << "[Z1STOCK-DIAG] ro.boot.hardware absent; using ro.hardware=z1";
++        }
+         property_set(prop_map[i].dst_prop, (!value.empty()) ? value : prop_map[i].default_value);
+     }
+ }
+@@ -472,6 +487,42 @@
+         // want them to trigger reboot, so we directly call _exit() for children processes here.
+         if (getpid() != 1) {
              _exit(signal);
-         }
- 
++        }
++
 +        if (stock_fatal_capture) {
 +            // Keep the independent ACM logger alive long enough to replay the
 +            // fatal message. No C++ logging, allocation or formatted I/O here.
@@ -69,12 +85,10 @@
 +                    if (poll(nullptr, 0, wait_ms) >= 0 || errno != EINTR) break;
 +                }
 +            }
-+        }
-+
+         }
+ 
          // Calling DoReboot() or LOG(FATAL) is not a good option as this is a signal handler.
-         // RebootSystem uses syscall() which isn't actually async-signal-safe, but our only option
-         // and probably good enough given this is already an error case and only enabled for
-@@ -558,6 +602,8 @@
+@@ -558,6 +609,8 @@
          return SubcontextMain(argc, argv, &function_map);
      }
  
@@ -83,7 +97,7 @@
      if (REBOOT_BOOTLOADER_ON_PANIC) {
          InstallRebootSignalHandlers();
      }
-@@ -613,22 +659,45 @@
+@@ -613,22 +666,45 @@
  
          LOG(INFO) << "init first stage started!";
  
@@ -131,7 +145,7 @@
              PLOG(FATAL) << "restorecon failed of /init failed";
          }
  
-@@ -640,7 +709,11 @@
+@@ -640,7 +716,11 @@
  
          char* path = argv[0];
          char* args[] = { path, nullptr };
@@ -143,7 +157,7 @@
  
          // execv() only returns if an error happened, in which case we
          // panic and never fall through this conditional.
-@@ -650,6 +723,7 @@
+@@ -650,6 +730,7 @@
      // At this point we're in the second stage of init.
      InitKernelLogging(argv);
      LOG(INFO) << "init second stage started!";

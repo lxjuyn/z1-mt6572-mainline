@@ -95,6 +95,11 @@
       "file": "system/core/init/log.cpp",
       "exit": 0,
       "error": ""
+    },
+    {
+      "file": "system/core/init/security.cpp",
+      "exit": 0,
+      "error": ""
     }
   ]
 }
