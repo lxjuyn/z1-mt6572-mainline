@@ -28,6 +28,21 @@
 #include <linux/kobject.h>
 #include <linux/workqueue.h>
 #include <linux/sysfs.h>
+#include <linux/ktime.h>
+#include <net/sock.h>
+#include <net/inet_sock.h>
+#include <net/net_namespace.h>
+
+#define IDLETIMER_MAX_PENDING_EVENTS 64
+
+/* Queue transitions instead of coalescing inactive/active into one work item. */
+struct idletimer_event {
+	struct list_head list;
+	u64 time_ns;
+	bool active;
+	bool have_uid;
+	uid_t uid;
+};
 
 struct idletimer_tg {
 	struct list_head entry;
@@ -40,6 +55,15 @@ struct idletimer_tg {
 
 	unsigned int refcnt;
 	u8 timer_type;
+	bool send_nl_msg;
+	bool active;
+	u64 deadline_ns;
+	spinlock_t state_lock;
+	struct list_head events;
+	unsigned int event_count;
+	unsigned long dropped_events;
+	bool overflow_pending;
+	struct idletimer_event overflow_event;
 };
 
 static LIST_HEAD(idletimer_tg_list);
@@ -90,29 +114,164 @@ static ssize_t idletimer_tg_show(struct device *dev,
 	return sysfs_emit(buf, "0\n");
 }
 
+/* state_lock held; notifications run in process context. */
+static void idletimer_queue_event(struct idletimer_tg *timer, bool active,
+                                 u64 time_ns, const struct sk_buff *skb)
+{
+ struct idletimer_event *event = NULL;
+ struct sock *sk = skb ? skb_to_full_sk(skb) : NULL;
+ if (!timer->send_nl_msg)
+  return;
+ if (!timer->overflow_pending &&
+     timer->event_count < IDLETIMER_MAX_PENDING_EVENTS)
+  event = kmalloc(sizeof(*event), GFP_ATOMIC);
+ if (!event) {
+  timer->dropped_events++;
+  pr_warn_ratelimited("%s: activity history dropped=%lu; preserving latest state\n",
+                      timer->attr.attr.name, timer->dropped_events);
+  /* Preserve the last state without allocation so overflow cannot leave
+   * netd permanently believing the interface is inactive. */
+  event = &timer->overflow_event;
+  timer->overflow_pending = true;
+ }
+ event->active = active;
+ event->time_ns = time_ns;
+ event->have_uid = sk != NULL;
+ event->uid = sk ? from_kuid_munged(&init_user_ns, sk_uid(sk)) : 0;
+ if (event != &timer->overflow_event) {
+  list_add_tail(&event->list, &timer->events);
+  timer->event_count++;
+ }
+ schedule_work(&timer->work);
+}
+
+static void idletimer_emit_event(struct idletimer_tg *timer,
+                                const struct idletimer_event *event)
+{
+ char iface[sizeof("INTERFACE=") + MAX_IDLETIMER_LABEL_SIZE];
+ char timestamp[40], uid[32];
+ char *env[] = { iface, event->active ? "STATE=active" : "STATE=inactive",
+                timestamp, event->have_uid ? uid : NULL, NULL };
+ snprintf(iface, sizeof(iface), "INTERFACE=%s", timer->attr.attr.name);
+ snprintf(timestamp, sizeof(timestamp), "TIME_NS=%llu", event->time_ns);
+ snprintf(uid, sizeof(uid), "UID=%u", event->uid);
+ kobject_uevent_env(idletimer_tg_kobj, KOBJ_CHANGE, env);
+}
+
 static void idletimer_tg_work(struct work_struct *work)
 {
-	struct idletimer_tg *timer = container_of(work, struct idletimer_tg,
-						  work);
+ struct idletimer_tg *timer = container_of(work, struct idletimer_tg, work);
+ struct idletimer_event *event, *tmp, overflow;
+ LIST_HEAD(events);
+ unsigned long flags;
+ bool have_overflow;
+ sysfs_notify(idletimer_tg_kobj, NULL, timer->attr.attr.name);
+ spin_lock_irqsave(&timer->state_lock, flags);
+ list_splice_init(&timer->events, &events);
+ timer->event_count = 0;
+ have_overflow = timer->overflow_pending;
+ if (have_overflow)
+  overflow = timer->overflow_event;
+ timer->overflow_pending = false;
+ spin_unlock_irqrestore(&timer->state_lock, flags);
+ list_for_each_entry_safe(event, tmp, &events, list) {
+  idletimer_emit_event(timer, event);
+  list_del(&event->list);
+  kfree(event);
+ }
+ if (have_overflow)
+  idletimer_emit_event(timer, &overflow);
+}
 
-	sysfs_notify(idletimer_tg_kobj, NULL, timer->attr.attr.name);
+/* state_lock held. Ordinary timer timeouts pause during suspend; alarm
+ * timeouts include suspend. Keep expiry tests in the timer's own clock. */
+static bool idletimer_has_expired(struct idletimer_tg *timer, u64 boot_now)
+{
+ return (timer->timer_type & XT_IDLETIMER_ALARM) ?
+        boot_now >= timer->deadline_ns :
+        time_after_eq(jiffies, timer->timer.expires);
+}
+
+/* Translate the actual timeout clock to Pie's boottime event timestamp.
+ * For ordinary timers, subtract only elapsed running jiffies, never sleep. */
+static u64 idletimer_expiry_timestamp(struct idletimer_tg *timer, u64 boot_now)
+{
+ u64 late;
+ if (timer->timer_type & XT_IDLETIMER_ALARM)
+  return min(timer->deadline_ns, boot_now);
+ late = jiffies_to_nsecs(jiffies - timer->timer.expires);
+ return boot_now - min(late, boot_now);
+}
+
+static void idletimer_expire(struct idletimer_tg *timer)
+{
+ unsigned long flags;
+ u64 boot_now;
+ spin_lock_irqsave(&timer->state_lock, flags);
+ boot_now = ktime_get_boottime_ns();
+ /* A packet can renew the deadline after this callback was dispatched. */
+ if (timer->active && idletimer_has_expired(timer, boot_now)) {
+  timer->active = false;
+  idletimer_queue_event(timer, false,
+                       idletimer_expiry_timestamp(timer, boot_now), NULL);
+ }
+ spin_unlock_irqrestore(&timer->state_lock, flags);
+ schedule_work(&timer->work);
 }
 
 static void idletimer_tg_expired(struct timer_list *t)
 {
-	struct idletimer_tg *timer = timer_container_of(timer, t, timer);
-
-	pr_debug("timer %s expired\n", timer->attr.attr.name);
-
-	schedule_work(&timer->work);
+ struct idletimer_tg *timer = timer_container_of(timer, t, timer);
+ idletimer_expire(timer);
 }
 
 static void idletimer_tg_alarmproc(struct alarm *alarm, ktime_t now)
 {
-	struct idletimer_tg *timer = alarm->data;
+ idletimer_expire(alarm->data);
+}
 
-	pr_debug("alarm %s expired\n", timer->attr.attr.name);
-	schedule_work(&timer->work);
+static void idletimer_init_state(struct idletimer_tg *timer, bool notify,
+                                unsigned int timeout)
+{
+ spin_lock_init(&timer->state_lock);
+ INIT_LIST_HEAD(&timer->events);
+ timer->send_nl_msg = notify;
+ timer->active = true;
+ timer->deadline_ns = ktime_get_boottime_ns() + (u64)timeout * NSEC_PER_SEC;
+}
+
+static void idletimer_packet(struct idletimer_tg *timer, unsigned int timeout,
+                            const struct sk_buff *skb)
+{
+ unsigned long flags;
+ u64 now;
+ spin_lock_irqsave(&timer->state_lock, flags);
+ now = ktime_get_boottime_ns();
+ /* Preserve both transitions if expiry's callback was delayed by traffic. */
+ if (timer->active && idletimer_has_expired(timer, now)) {
+  timer->active = false;
+  idletimer_queue_event(timer, false,
+                       idletimer_expiry_timestamp(timer, now), NULL);
+ }
+ if (!timer->active) {
+  timer->active = true;
+  idletimer_queue_event(timer, true, now, skb);
+ }
+ timer->deadline_ns = now + (u64)timeout * NSEC_PER_SEC;
+ if (timer->timer_type & XT_IDLETIMER_ALARM)
+  alarm_start_relative(&timer->alarm, ktime_set(timeout, 0));
+ else
+  mod_timer(&timer->timer, secs_to_jiffies(timeout) + jiffies);
+ spin_unlock_irqrestore(&timer->state_lock, flags);
+}
+
+static void idletimer_free_events(struct idletimer_tg *timer)
+{
+ struct idletimer_event *event, *tmp;
+ list_for_each_entry_safe(event, tmp, &timer->events, list) {
+  list_del(&event->list);
+  kfree(event);
+ }
 }
 
 static int idletimer_check_sysfs_name(const char *name, unsigned int size)
@@ -166,6 +325,7 @@ static int idletimer_tg_create(struct idletimer_tg_info *info)
 	info->timer->refcnt = 1;
 
 	INIT_WORK(&info->timer->work, idletimer_tg_work);
+	idletimer_init_state(info->timer, false, info->timeout);
 
 	mod_timer(&info->timer->timer,
 		  secs_to_jiffies(info->timeout) + jiffies);
@@ -184,7 +344,7 @@ static int idletimer_tg_create_v1(struct idletimer_tg_info_v1 *info)
 {
 	int ret;
 
-	info->timer = kmalloc_obj(*info->timer);
+	info->timer = kzalloc_obj(*info->timer);
 	if (!info->timer) {
 		ret = -ENOMEM;
 		goto out;
@@ -218,6 +378,7 @@ static int idletimer_tg_create_v1(struct idletimer_tg_info_v1 *info)
 	info->timer->refcnt = 1;
 
 	INIT_WORK(&info->timer->work, idletimer_tg_work);
+	idletimer_init_state(info->timer, info->send_nl_msg, info->timeout);
 
 	if (info->timer->timer_type & XT_IDLETIMER_ALARM) {
 		ktime_t tout;
@@ -246,39 +407,19 @@ out:
  * The actual xt_tables plugin.
  */
 static unsigned int idletimer_tg_target(struct sk_buff *skb,
-					 const struct xt_action_param *par)
+                                         const struct xt_action_param *par)
 {
-	const struct idletimer_tg_info *info = par->targinfo;
-
-	pr_debug("resetting timer %s, timeout period %u\n",
-		 info->label, info->timeout);
-
-	mod_timer(&info->timer->timer,
-		  secs_to_jiffies(info->timeout) + jiffies);
-
-	return XT_CONTINUE;
+ const struct idletimer_tg_info *info = par->targinfo;
+ idletimer_packet(info->timer, info->timeout, skb);
+ return XT_CONTINUE;
 }
 
-/*
- * The actual xt_tables plugin.
- */
 static unsigned int idletimer_tg_target_v1(struct sk_buff *skb,
-					 const struct xt_action_param *par)
+                                            const struct xt_action_param *par)
 {
-	const struct idletimer_tg_info_v1 *info = par->targinfo;
-
-	pr_debug("resetting timer %s, timeout period %u\n",
-		 info->label, info->timeout);
-
-	if (info->timer->timer_type & XT_IDLETIMER_ALARM) {
-		ktime_t tout = ktime_set(info->timeout, 0);
-		alarm_start_relative(&info->timer->alarm, tout);
-	} else {
-		mod_timer(&info->timer->timer,
-				secs_to_jiffies(info->timeout) + jiffies);
-	}
-
-	return XT_CONTINUE;
+ const struct idletimer_tg_info_v1 *info = par->targinfo;
+ idletimer_packet(info->timer, info->timeout, skb);
+ return XT_CONTINUE;
 }
 
 static int idletimer_tg_helper(struct idletimer_tg_info *info)
@@ -306,6 +447,11 @@ static int idletimer_tg_checkentry(const struct xt_tgchk_param *par)
 	struct idletimer_tg_info *info = par->targinfo;
 	int ret;
 
+	/* Timer labels/sysfs are global. Namespace rules must not reset a
+	 * host notification timer, including revision-0 shared labels. */
+	if (!net_eq(par->net, &init_net))
+		return -EOPNOTSUPP;
+
 	pr_debug("checkentry targinfo%s\n", info->label);
 
 	ret = idletimer_tg_helper(info);
@@ -325,8 +471,7 @@ static int idletimer_tg_checkentry(const struct xt_tgchk_param *par)
 		}
 
 		info->timer->refcnt++;
-		mod_timer(&info->timer->timer,
-			  secs_to_jiffies(info->timeout) + jiffies);
+		idletimer_packet(info->timer, info->timeout, NULL);
 
 		pr_debug("increased refcnt of timer %s to %u\n",
 			 info->label, info->timer->refcnt);
@@ -348,10 +493,15 @@ static int idletimer_tg_checkentry_v1(const struct xt_tgchk_param *par)
 	struct idletimer_tg_info_v1 *info = par->targinfo;
 	int ret;
 
+	/* Timer labels/sysfs are global. Namespace rules must not reset a
+	 * host notification timer, including revision-0 shared labels. */
+	if (!net_eq(par->net, &init_net))
+		return -EOPNOTSUPP;
+
 	pr_debug("checkentry targinfo%s\n", info->label);
 
-	if (info->send_nl_msg)
-		return -EOPNOTSUPP;
+	if (info->send_nl_msg > 1)
+		return -EINVAL;
 
 	ret = idletimer_tg_helper((struct idletimer_tg_info *)info);
 	if(ret < 0)
@@ -369,7 +519,8 @@ static int idletimer_tg_checkentry_v1(const struct xt_tgchk_param *par)
 
 	info->timer = __idletimer_tg_find_by_label(info->label);
 	if (info->timer) {
-		if (info->timer->timer_type != info->timer_type) {
+		if (info->timer->timer_type != info->timer_type ||
+		    info->timer->send_nl_msg != !!info->send_nl_msg) {
 			pr_debug("Adding/Replacing rule with same label and different timer type is not allowed\n");
 			mutex_unlock(&list_mutex);
 			return -EINVAL;
@@ -387,8 +538,7 @@ static int idletimer_tg_checkentry_v1(const struct xt_tgchk_param *par)
 				alarm_start_relative(&info->timer->alarm, tout);
 			}
 		} else {
-				mod_timer(&info->timer->timer,
-					secs_to_jiffies(info->timeout) + jiffies);
+				idletimer_packet(info->timer, info->timeout, NULL);
 		}
 		pr_debug("increased refcnt of timer %s to %u\n",
 			 info->label, info->timer->refcnt);
@@ -427,6 +577,7 @@ static void idletimer_tg_destroy(const struct xt_tgdtor_param *par)
 
 	timer_shutdown_sync(&info->timer->timer);
 	cancel_work_sync(&info->timer->work);
+	idletimer_free_events(info->timer);
 	sysfs_remove_file(idletimer_tg_kobj, &info->timer->attr.attr);
 	kfree(info->timer->attr.attr.name);
 	kfree(info->timer);
@@ -458,6 +609,7 @@ static void idletimer_tg_destroy_v1(const struct xt_tgdtor_param *par)
 		timer_shutdown_sync(&info->timer->timer);
 	}
 	cancel_work_sync(&info->timer->work);
+	idletimer_free_events(info->timer);
 	sysfs_remove_file(idletimer_tg_kobj, &info->timer->attr.attr);
 	kfree(info->timer->attr.attr.name);
 	kfree(info->timer);

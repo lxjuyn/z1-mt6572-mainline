@@ -1521,6 +1521,13 @@ config NETFILTER_XT_MATCH_PKTTYPE
 
 	  To compile it as a module, choose M here.  If unsure, say N.
 
+config NETFILTER_XT_MATCH_QUOTA2
+	tristate "Android named quota2 match"
+	depends on NETFILTER_ADVANCED && PROC_FS
+	help
+	  Named, writable byte/packet counters shared by IPv4 and IPv6 rules.
+	  Provides the Pie /proc/net/xt_quota ABI and quota-limit uevents.
+
 config NETFILTER_XT_MATCH_QUOTA
 	tristate '"quota" match support'
 	depends on NETFILTER_ADVANCED
