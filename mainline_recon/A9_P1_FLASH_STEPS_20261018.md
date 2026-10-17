@@ -25,7 +25,7 @@ tools/flash_with_retry.sh bootimg out/boot_mainline_a9p1_A.img <工作区根>/1/
 Z1_CAPTURE_BAUD=921600 ./z1_capture_mainline.sh 600      # 或 ./z1_capture_mainline.sh 180（C3 桥）
 ```
 A 正常后再刷 B；任何异常先刷回 `1/boot.img`。**刷写才插下载线，正常开机拔掉。**
-（venv 已按授权重建；若 pip 网络失败则改用 `SP_Flash_Tool_Linux/`，Download Only，只勾 bootimg，勿动 userdata。）
+**刷机链已就绪**：`mtkclient_venv` 已重建并实测可用（`usb1/serial/Crypto/hexdump/colorama` 全部可导入，`mtk.py --help` 退出码 0；注意 `usb1` 模块由 PyPI 包 `libusb1` 提供，requirements 里的 PySide6/keystone 等 GUI/其它依赖对 CLI 刷写非必需，故按定向安装）。备选 `SP_Flash_Tool_Linux/` 亦在位（Download Only，只勾 bootimg，勿动 userdata）。
 
 ## 3. 串口判读（探针输出 `RESULT_STEP_*`）
 | 项 | 预期 | FAIL 的含义 |

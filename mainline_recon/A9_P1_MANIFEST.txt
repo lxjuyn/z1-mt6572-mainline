@@ -1,5 +1,5 @@
-# A9 P1 构建台账 2026-10-18T01:19:20+08:00
-branch=wip/a9-mainline HEAD=f64004fc3f7276796090259a283332b6bf8589fd
+# A9 P1 构建台账 2026-10-18T01:21:45+08:00
+branch=wip/a9-mainline HEAD=44f3794c57f73760a9ee35db9c93e58e5c7d6b39
 baseline=ffdff0653 (main)
 config_sha256=4a88623c3a7e9779e680c0500e6dcb34404f2fe550edb71550cd6767176a9128
 kernelrelease=7.0.0-rc7-z1+
