@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: GPL-2.0
 menu "Android"
 
+config ANDROID_ASHMEM
+	bool "Android ashmem device"
+	depends on MMU && SHMEM
+	help
+	  Provide the /dev/ashmem ABI used by Android 9 userspace. The
+	  implementation uses tmpfs as its backing store and supports the
+	  legacy pin, unpin, and purge ioctls.
+
 config ANDROID_BINDER_IPC
 	bool "Android Binder IPC Driver"
 	depends on MMU
