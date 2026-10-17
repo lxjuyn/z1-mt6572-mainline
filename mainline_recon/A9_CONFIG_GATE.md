@@ -33,18 +33,35 @@
 3. **`ANDROID_BINDERFS` 必须保持关闭**：6.x/7.x 上若开 binderfs，`/dev/binder` 不再是驱动自动创建的静态节点，而要挂载 binderfs 并由 init 建节点（Android 10+ 的 `dev/binderfs` 路线）。本轮目标是最小改动拿到桌面，因此显式 `=n`，并在探针里用 `/proc/filesystems` 反查该事实。
 4. **`BLK_DEV_DM` 藏在 `if MD` 里**：未开 `CONFIG_MD` 时该符号根本不出现，`--enable` 也留不住。SELinux 同理需要 `SECURITY_NETWORK`（`security/selinux/Kconfig:4` 的依赖是 `SECURITY_NETWORK && AUDIT && NET && INET`）。依赖补齐后必须**重新 `--enable`**，因为上一轮 `olddefconfig` 已把它们清掉。
 
-## 3. 顺带发现的既有缺陷：clean 构建必然断链（非 A9 引入）
+## 3. 我自己引入的坑（已修正，并附误判过程）
 
-现象：新 worktree 从 `ffdff0653` 检出后 `make clean` + 全量构建，链接报
-`net/rfkill/core.o: undefined reference to rfkill_handler_init/exit`。
+**症状**：`make clean` 全量构建在链接期报 `net/rfkill/core.o: undefined reference to rfkill_handler_init/exit`，后又报 `drivers/irqchip/irq-omap-intc.o` / `arch/arm/mach-omap2/prm_common.o` 未定义 `irq_gc_*`、`irq_alloc_generic_chip`。
 
-证据链：
-- 主树 `fork_linux/net/rfkill/` 有 `input.o`（8-30 构建遗留），全量 clean 的 worktree **不生成** `input.o`；
-- 两树 `net/rfkill/Makefile` 逐字节一致（`diff` 无输出）；
-- `config RFKILL_INPUT` 仍在 `net/rfkill/Kconfig:21`，`.config` 也是 `=y`，`core.c` 三处 `#ifdef CONFIG_RFKILL_INPUT` 点亮了调用点，但 `include/config/rfkill/` 目录为空、`input.o` 未进对象列表。
+**我最初的结论是错的**：当时判断为"本仓既有缺陷，主树靠陈旧 input.o 混过链接"，并提交关闭 `CONFIG_RFKILL_INPUT`（`a394377a9`）。该结论已作废。
 
-结论：**这份提交在自身配置下无法干净构建**，主树此前是靠一个陈旧 `input.o` 混过链接的——正是本项目两次踩过的"陈旧产物伪装成有效产物"。
-处置：关闭 `CONFIG_RFKILL_INPUT`（仅把按键事件映射成 rfkill 开关，Android 9 不用、Z1 也无对应实体键），使配置自洽可 clean 构建。提交 `a394377a9`。
+**真实根因（可复现证据）**：我在符号门里执行了
+`scripts/config --set-str CONFIG_ANDROID_BINDER_DEVICES '"binder,hwbinder,vndbinder"'` ——
+多包了一层引号，`--set-str` 自己会加引号，结果 `.config` 与 `z1_defconfig` 里写成
+`CONFIG_ANDROID_BINDER_DEVICES="\"`。同步出的 `include/config/auto.conf` 第 17 行因此变成
+以反斜杠结尾的续行，把**第 18 行的下一个符号吞成续行**：
+
+```
+CONFIG_ANDROID_BINDER_DEVICES=\
+CONFIG_GENERIC_IRQ_CHIP=y        <- 被上一行吞掉
+```
+
+于是出现极隐蔽的分裂状态：`include/generated/autoconf.h`（C 宏，直接来自 .config）里有
+`CONFIG_RFKILL_INPUT`/`CONFIG_GENERIC_IRQ_CHIP`，驱动的 `#ifdef` 生效并调用符号；而 make 变量为空，
+`obj-$(CONFIG_...) += xxx.o` 不成立，`input.o`/`generic-chip.o` 根本不参与编译 → 链接必断。
+判定手法（记下来，下次直接用）：在子目录 Makefile 里临时插一行
+`$(info CHIP=[$(CONFIG_GENERIC_IRQ_CHIP)])`，看子 make 的真实取值；第一次给出 `CHIP=[]`
+而 `auto.conf` 明明有该行，即锁定为"变量未展开"而非"配置没开"。
+
+**修正**：值改为不带内层引号的 `'binder,hwbinder,vndbinder'`；`olddefconfig` 后子 make 视角
+`CHIP=[y]`，`kernel/irq/generic-chip.o` 与 `net/rfkill/input.o` 均正常生成；
+`CONFIG_RFKILL_INPUT` 恢复为 `y`（先前那次关闭属于误诊，Android 用不用它与此缺陷无关）。
+**教训**：`scripts/config` 写字符串型符号时绝不能再套引号；字符串行一旦畸形，破坏面是"下一行"，
+症状会出现在完全无关的子系统上。
 
 ## 4. 尚未证明 / 待板上定论
 
