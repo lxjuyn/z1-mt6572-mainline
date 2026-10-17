@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 OR Apache-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * Copyright 2008 Google Inc.
  * Author: Robert Love
@@ -31,7 +31,7 @@ struct ashmem_pin {
 
 #define ASHMEM_SET_NAME		_IOW(__ASHMEMIOC, 1, char[ASHMEM_NAME_LEN])
 #define ASHMEM_GET_NAME		_IOR(__ASHMEMIOC, 2, char[ASHMEM_NAME_LEN])
-#define ASHMEM_SET_SIZE		_IOW(__ASHMEMIOC, 3, size_t)
+#define ASHMEM_SET_SIZE		_IOW(__ASHMEMIOC, 3, __kernel_size_t)
 #define ASHMEM_GET_SIZE		_IO(__ASHMEMIOC, 4)
 #define ASHMEM_SET_PROT_MASK	_IOW(__ASHMEMIOC, 5, unsigned long)
 #define ASHMEM_GET_PROT_MASK	_IO(__ASHMEMIOC, 6)

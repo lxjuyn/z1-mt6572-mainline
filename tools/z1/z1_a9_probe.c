@@ -73,6 +73,10 @@ struct dma_heap_allocation_data {
 #define MY_PR_GET_SECCOMP     21
 #define MY_PR_GET_NO_NEW_PRIVS 38
 
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
+
 struct my_timespec { long tv_sec; long tv_nsec; };
 struct my_itimerspec { struct my_timespec it_interval; struct my_timespec it_value; };
 
@@ -170,6 +174,14 @@ static long sc5(long n, long a, long b, long c, long d, long e)
 #define fd_close(f)   sc1(__NR_close, (f))
 #define rd(f, b, n)   sc3(__NR_read, (long)(f), (long)(b), (long)(n))
 #define ioc(f, c, a)  sc3(__NR_ioctl, (long)(f), (long)(c), (long)(a))
+
+/* -nostdlib 链接桩：libgcc 的 __aeabi_ldiv0 引用 raise()，该路径运行时不会走到。
+ * 仅为满足链接，永不返回正常语义。 */
+#ifndef __arm__
+int raise(int sig) { (void)sig; return -1; }
+#else
+int raise(int sig) { (void)sig; sc1(__NR_exit_group, 137); for (;;) { } return -1; }
+#endif
 
 /* ---------------- 行缓冲输出：'\n' 立即 write，防早期崩溃丢日志 ---------------- */
 static unsigned int outpos;
@@ -343,7 +355,7 @@ static void probe_ashmem(void)
 		putch('\n');
 	}
 	{
-		char nm[32] = "z1-a9-probe";
+		static char nm[256] = "z1-a9-probe"; /* static 避免 -nostdlib 下触发 memset */
 		long r2 = ioc(fd, ASHMEM_SET_NAME, &nm);
 		long r3 = ioc(fd, ASHMEM_SET_SIZE, 4096);
 		ps("RESULT_STEP_ashmem_name_size=INFO set_name=");
