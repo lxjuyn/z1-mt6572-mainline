@@ -20,8 +20,8 @@ boot 分区上限 6,291,456 → **余量 217,088 B**。`kernelrelease=7.0.0-rc7-
 
 ## 2. 刷写顺序（你来执行）
 ```bash
-cd /home/lxj/claude/6572
-tools/flash_with_retry.sh bootimg out/boot_mainline_a9p1_A.img /home/lxj/claude/6572/1/boot.img 8
+cd <工作区根>   # 本机为 /home/<用户>/claude/6572
+tools/flash_with_retry.sh bootimg out/boot_mainline_a9p1_A.img <工作区根>/1/boot.img 8
 Z1_CAPTURE_BAUD=921600 ./z1_capture_mainline.sh 600      # 或 ./z1_capture_mainline.sh 180（C3 桥）
 ```
 A 正常后再刷 B；任何异常先刷回 `1/boot.img`。**刷写才插下载线，正常开机拔掉。**
