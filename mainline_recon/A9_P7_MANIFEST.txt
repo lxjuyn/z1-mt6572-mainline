@@ -1,0 +1,24 @@
+# A9 P7 构建台账 2026-10-18 (摘掉 eBPF：A9 ramdisk 余量 1.58MiB -> 1.83MiB)
+
+branch=wip/a9-mainline HEAD= kernelrelease=7.0.0-rc7-z1+
+依据: arch/Kconfig:660 SECCOMP_FILTER 在本树是 def_bool y，只 depends on
+  HAVE_ARCH_SECCOMP_FILTER && SECCOMP && NET，不再依赖 BPF_SYSCALL(推翻 A9_CONFIG_GATE 陷阱2)。
+  摘除: BPF_SYSCALL/CGROUP_BPF/NETFILTER_BPF_LINK/BPF_EVENTS/BPF_STREAM_PARSER/BPF_PRELOAD/DEBUG_INFO_BTF。
+产物反证: extract-ikconfig 里 SECCOMP_FILTER=y 而 BPF_SYSCALL 完全消失；
+  nm vmlinux 里 sk_filter 系列 11 个符号在(经典 BPF/A9 minijail 路线不受影响)。
+
+ramdisk=ramdisk_a9p6.gz body=1276124 -> linux,initrd-end=0x842378dc(与 P6 同一 ramdisk)
+
+  4346368 7fcd131976d44677daf64ac9f54c71fd3334b24d4f50d1998b1e6d92d412faa1  zImage
+  5648384 0f9ff04c3135a100cc3ce97017faa4dd8a9bbb2f25c834a0e45ecbfdfb2890e9  out/boot_mainline_a9p7_D1_1b.img
+  5648384 7354c780ee4509cf268fd8597739cf53449623e9ba5f8ab6b4fdc1e8895ceaa4  out/boot_mainline_a9p7_D4_4b.img
+  1276636 b1ed2bb5f03460f94f03204c12de0aa696b0afb8d710a91b57b6fdd41e402f24  out/ramdisk_a9p6.gz
+    10572 2b672069c5d0e5132c26a84c7b620946f54db1ebb87b983a2d43b7d71a48464e  xt_quota2.ko
+    14808 8b28e4294e437345fd039fe7a83f9453c727fede35ae0fae5e4dab4b42a65d48  xt_IDLETIMER.ko
+   173699 9941a7b559df13a5568378a0a6ac3aff1ec33ac001dab6429edd227850217a34  .config
+
+zImage 4,612,608 -> 4,346,368 (-266,240 B)；镜像 5,914,624 -> 5,648,384；
+余量 376,832 -> 643,072 B；**A9 generic ramdisk 上限 1,654,944 -> 1,921,196 B(约 1.83 MiB)**。
+两件 RESULT: VALID + VERIFY=OK + PAYLOAD-OK；DEVCHAIN_FAIL=0；.ko vermagic 同轮。
+如实记录: 我一度以为"net/kcm 的 KCM 是唯一 select BPF_SYSCALL 的来源"，错了 —— KCM 在本树
+  根本不是符号(那次 grep 被 head -12 截断)；实际是随 BPF 周边选项一起摘掉后才放开的。

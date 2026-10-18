@@ -68,3 +68,18 @@ CONFIG_GENERIC_IRQ_CHIP=y        <- 被上一行吞掉
 - `nm vmlinux` 与 `.ko` 的命中（证③）在本文件构建完成后补记。
 - 探针的板级结论（binder/hwbinder/vndbinder/ashmem/timerfd/cgroup/xattr/seccomp/dma-heap）见 `A9_P1_FLASH_STEPS_*.md` 的判读表。
 - `/dev/ion` 预期 FAIL(-2)：主线已删 ION，Pie gralloc 若坚持 ION ABI 则需要垫片，方案见 `A9_DMA_HEAP_CONTRACT.md`。
+
+
+## 5. 陷阱 2 已被证伪（2026-10-18 P7 更正，保留原文不删）
+
+上面 §2 陷阱 2 说"SECCOMP_FILTER 依赖 BPF_SYSCALL，必须显式开"。**在 7.0.0-rc7 上这不成立**：
+`arch/Kconfig:660` 里 `config SECCOMP_FILTER` 是 `def_bool y`，
+`depends on HAVE_ARCH_SECCOMP_FILTER && SECCOMP && NET` —— 没有 BPF_SYSCALL。
+该依赖是早期 Android common kernel(3.18/4.x)的事实。
+
+因此本树可以摘掉整个 eBPF（`BPF_SYSCALL`/`CGROUP_BPF`/`NETFILTER_BPF_LINK`/`BPF_EVENTS`/
+`BPF_STREAM_PARSER`/`BPF_PRELOAD`/`DEBUG_INFO_BTF`），换来 zImage **-266,240 B**。
+A9 侧不受影响的理由：minijail/zygote 用的是经典 BPF(`SO_FILTER`/`sock_fprog`，
+产物里 `sk_filter*` 11 个符号仍在)；`bpfloader` 与 cgroup-bpf 是 Android 10+ 的东西；
+Pie 的 netd 走 iptables + `xt_quota2`(本仓 =m)。板上由探针 `seccomp_filter` 项与
+`[a9cfg]` 段自证。**GATE_Y 里的 CGROUP_BPF 已移出，GATE_N 加入 BPF_SYSCALL/CGROUP_BPF。**

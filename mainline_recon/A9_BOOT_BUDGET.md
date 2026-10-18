@@ -70,3 +70,12 @@
 
 - 出 A9 boot.img 之前，先跑一次"裁剪 + 体积复测"，把 kernel+dtb 压回 ≤ 4.3 MB，
   给 A9 ramdisk 留出 ≥ 1.5 MB；裁完必须重新过 `RESULT: VALID` 与符号三证（防止裁掉 A9 必需项）。
+
+
+## 6. P7 追加实测（2026-10-18）：摘 eBPF 才是这块肉
+
+本文 §3 说"腾空间该裁无关平台代码"，P2 照做省下 217,088 B；但 eBPF(`kernel/bpf` 内建 613 KB TEXT、
+其中 verifier 208 KB)一直因为"SECCOMP_FILTER 依赖 BPF_SYSCALL"这句**在 7.0-rc7 已失效**的理由被供着。
+P7 摘掉后：zImage 4,612,608 → **4,346,368**(-266,240 B)，
+A9 generic ramdisk 上限 1,654,944 → **1,921,196 B**。
+教训：**"某个符号不能关"这种断言，要去本树 Kconfig 读依赖，不能引用文档或老内核的记忆。**
