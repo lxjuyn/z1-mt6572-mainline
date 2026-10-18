@@ -59,4 +59,65 @@ python3 tools/z1/z1_a9_ramdisk_accept.py <generic ramdisk>          # 验收 ram
 A9_RAMDISK=… tools/z1/z1_a9_p2.sh pack 1b out/boot_mainline_a9p5.img # 出 boot（预算/闸门/载荷核验）
 python3 tools/z1/z1_a9_mainline_system.py --system <system.img> --out out/a9sys   # 镜像级改造
 tools/z1/z1_a9_flashpkg.sh --boot out/boot_mainline_a9p5.img --system out/a9sys/system_mainline.img
+#   ^ 装配阶段现在会自动跑 z1_a9_system_accept.py --expect-adapted，不过就拒绝出包
 ```
+
+## 6. P9 新增：system 镜像内容级验收闸（`tools/z1/z1_a9_system_accept.py`）
+
+装包原先只查"容量 + sparse/ext4 magic"，也就是**把原厂 4.4 或某台 arm64 机型的 A9 灌进去
+照样出包** —— 那两种刷上去都表现为 boot 到 init 就挂，而串口里最难读懂的正是 ABI/版本不匹配。
+所以把判据搬到离线阶段，逐条打印 OK/WARN/FAIL，`SYS_ACCEPT=ACCEPT|REJECT`，退出码 0/3。
+
+硬判据（FAIL，任一即拒绝出包）：
+
+| 判据 | 为什么是硬的 |
+|---|---|
+| `ro.build.version.sdk=28` | 不是 A9 就别刷 mainline A9 交付物 |
+| `ro.product.cpu.abi/abilist` 含 `armeabi-v7a` | 本树是 `ARCH=arm` 的 32 位内核，arm64-only 镜像跑不了 |
+| `/system/bin/init`、`servicemanager` 的 **ELF `e_machine` 必须是 EM_ARM(0x28)** | 属性会骗人，ELF 头不会；两条不一致时以 ELF 为准 |
+| 8 项 A9 支柱可执行文件齐备 | `init/sh/servicemanager/hwservicemanager/lmkd/netd/ueventd/app_process32`，缺任一 init→SystemServer 链必断 |
+| 无 `/z1_stock_kernel` 标记且 build.prop 无 `ro.z1.stock_kernel=1` | stock 代偿门未撤 → HIDL 永远走本地 passthrough |
+| hwservicemanager/vndservicemanager 的 rc 里无 `disabled` | 同上，mainline 要真 HIDL 服务 |
+| 尺寸 ≤ android 分区 943,718,400 B | 超了刷机时被截断或拒收 |
+| `e2fsck` 报**结构性损坏**征兆（corrupt/inconsistent/missing/illegal/superblock…） | 真坏了不能刷 |
+| `--expect-adapted`：mainline device 层已投递 | 装配阶段专用，防"忘了跑 adapter" |
+
+软判据（WARN，不挡出包）：`metadata_csum`（能刷，但本机不可原地改块）、fs_state、路径数 <300
+（可能给错分区，但 `build.prop`/bins 那两条本身就会判死，所以不重复硬失败）、`ro.hardware`/
+`ro.product.device` 非 z1（靠 dts 的 `androidboot.hardware=z1` + `init.z1.rc` 兜，但要留意它按
+原机型找 vendor HAL）、vintf manifest / sepolicy 文件缺失、`e2fsck` 仅记账类瑕疵。
+
+**e2fsck 这条是实测逼出来的**：原厂 `1/system.img` 的 `e2fsck -fn` 返 rc=4，内容只是
+"Inode 位图末尾的填充值未设置"—— 打包器不是 e2fsprogs，纯记账瑕疵，照样能刷。第一版把它
+当 FAIL，就是一次**误拒**；改成按报文关键词分级后才对。
+
+## 7. 实测证据（四条，全部本机跑过）
+
+```
+CASE1 真实原厂 4.4 镜像        REJECT  FAIL sdk(=19) FAIL bins(hwservicemanager/lmkd/ueventd/app_process32)
+CASE2 A9 arm32 干净形状夹具     ACCEPT  FAIL=0 WARN=1(路径数)
+CASE3 A9 但 stock 门控+arm64   REJECT  FAIL=6：abi_prop/stock_prop/stock_marker/elf_init/elf_hwservicemanager/hidl_rc
+CASE4 未投 device 层 + --expect-adapted  REJECT  FAIL dev_layer
+端到端 正路：夹具 -> adapter(投 6 份 device 层) -> 验收 ACCEPT -> 出包 rc=0，
+        包里带 SYS_ACCEPT.json/log 与哈希；负路：同一命令换真 4.4 -> 预检拒出包 rc=3。
+```
+
+复现：`bash tools/z1/z1_a9_system_accept_selftest.sh`（夹具用 `mke2fs -d` 落目录，
+arm64 负夹具靠把 ELF 头偏移 18 的 `e_machine` 改成 0xB7，其余字节不动）。
+`/tmp` 夹具不入库；判据全部来自只读遍历，工具不写镜像。
+
+## 8. 给持 A9 system.img 那台机器的交付规格
+
+按上面硬判据准备即可，最容易被踩的两条：**必须是 arm32（armeabi-v7a）产物**，
+**不要把 stock 线的门控形态原样交过来**（要么在源机撤干净，要么交过来由本机 adapter 撤）。
+交接后本机一条命令自证是否合格：
+
+```sh
+python3 tools/z1/z1_a9_system_accept.py <system.img>          # 只读，不改镜像
+```
+
+顺带记一条取料事实（2026-10-18 复测）：`blob.lineageos.org` 是**真能下文件**的 LOS 主机
+（`/downloads/` 有 autoindex，`twrp/`、`heimdall/` 等，实测 200 且 Content-Length 真实），
+但**不放 ROM**；`update.lineageos.org` 现在连 DNS 都解析不了；`download.lineageos.org`
+对**任意路径**都回同一份 723 B 的 Vue 壳（`index.json`、`/m7/` 都一样），所以它的 200
+不代表可达。结论仍是：本机弄不到 A9 arm32 的 system 原料，卡点在出网面不在"32 位 A9 不存在"。

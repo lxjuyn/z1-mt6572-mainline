@@ -60,6 +60,18 @@ ext4   = sb == b'\x53\xef'
 print('system.img 形态: sparse=%s ext4=%s' % (sparse, ext4))
 sys.exit(0 if (sparse or ext4) else 1)
 PY
+  # 内容级验收：容量和 magic 都过的镜像，照样可能是原厂 4.4、或某台 arm64 机型的 A9 ——
+  # 那两种刷上去都是"boot 到 init 就挂"，而串口里最难读的正是 ABI 不匹配这类失败。
+  echo "----- system 内容级验收 (z1_a9_system_accept.py) -----"
+  python3 "$SELF/z1_a9_system_accept.py" "$SYS" --expect-adapted --json "$OUTDIR/SYS_ACCEPT.json" \
+    > "$OUTDIR/SYS_ACCEPT.log" 2>&1
+  if [ $? -ne 0 ]; then
+    grep -E '^(FAIL|CHECKS|SYS_ACCEPT)' "$OUTDIR/SYS_ACCEPT.log"
+    die "system.img 未通过 A9/mainline 内容验收（全文见 $OUTDIR/SYS_ACCEPT.log）"
+  else
+    grep -E '^(WARN|CHECKS|SYS_ACCEPT)' "$OUTDIR/SYS_ACCEPT.log" | sed 's/^/  /'
+    echo "  system 验收通过: $(grep -o 'SYS_ACCEPT=.*' "$OUTDIR/SYS_ACCEPT.log")"
+  fi
   cp "$SYS" "$OUTDIR/system.img"; SYS_NOTE=android
 else
   echo "system.img      未提供 —— 本次只出 boot-only 包（刷 bootimg 一张）"
@@ -80,7 +92,7 @@ echo "===== 指纹清单 ====="
   echo "# A9 刷机包 $(date -Is)"
   echo "scatter_src=$(basename "$SCATTER_SRC") branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD) HEAD=$(git -C "$WT" rev-parse HEAD)"
   echo "rollback=$(sha256sum "$ROLLBACK" | cut -d' ' -f1) <工作区根>/1/boot.img   # 不写绝对路径: 这份清单常被直接发出去"
-  ( cd "$OUTDIR" && sha256sum boot.img MT6572_Z1_A9_scatter.txt $( [ -f system.img ] && echo system.img ) )
+  ( cd "$OUTDIR" && sha256sum boot.img MT6572_Z1_A9_scatter.txt $( [ -f system.img ] && echo system.img SYS_ACCEPT.json SYS_ACCEPT.log ) )
 } | tee "$OUTDIR/HASHES.txt"
 
 if [ "$fail" -ne 0 ]; then
