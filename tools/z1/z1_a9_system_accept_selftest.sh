@@ -90,4 +90,16 @@ grep -E '^(FAIL dev_layer|SYS_ACCEPT)' "$WORK/adapt.log"
 [ $rc -eq 3 ] && echo "CASE4=PASS（未投递 device 层时拒绝，符合 --expect-adapted 语义）" \
   || { echo "CASE4=FAIL"; cat "$WORK/adapt.log"; exit 1; }
 
+echo "===== 5) 关键件丢可执行位（本轮真出过的错：/bin/init 0644）-> 必须 REJECT ====="
+stage_a9 "$WORK/s_noexec" arm clean
+mkimg "$WORK/s_noexec" "$WORK/a9_noexec.img"
+chmod 644 "$WORK/s_noexec/system/bin/init" 2>/dev/null
+# 直接在镜像里改权限，模拟 adapter 投错 mode
+debugfs -w -R 'set_inode_field /system/bin/init mode 0644' "$WORK/a9_noexec.img" 2>/dev/null
+python3 "$SELF/z1_a9_system_accept.py" "$WORK/a9_noexec.img" > "$WORK/noexec.log" 2>&1
+rc=$?
+grep -E 'FAIL exec_bit|SYS_ACCEPT' "$WORK/noexec.log"
+[ $rc -eq 3 ] && grep -q 'FAIL exec_bit' "$WORK/noexec.log" \
+  && echo "CASE5=PASS(丢可执行位被点名)" || { echo "CASE5=FAIL"; tail -5 "$WORK/noexec.log"; exit 1; }
+
 echo "SELFTEST=ALL_PASS"

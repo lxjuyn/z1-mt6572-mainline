@@ -348,16 +348,19 @@ def main():
                     continue
                 if exists(img, dest):
                     dbg(img, 'rm %s' % dest, write=True)
-                back = image_write(img, tmp, dest)
+                back = image_write(img, tmp, dest, mode='0755' if ('/bin/' in dest or f.name in ('init', 'ueventd')) else '0644')
                 if back != content:
                     print('ABORT: %s 读回不一致（期望 %d B 实得 %d B）' % (dest, len(content), len(back)))
                     return 3
                 entry['verified'] = 'readback_ok'
                 report['actions'].append(entry)
                 placed.append(dest)
-            # 0755 只对脚本有意义，其余 0644
-            if f.name.endswith('.sh'):
-                dbg(img, 'set_inode_field %s mode 100755' % dests[-1], write=True)
+            # 可执行位：init/ueventd 这类进 /bin 的东西必须是 0755 —— 投成 0644 的话
+            # 交棒 exec 直接失败（本轮最终审计就是靠比对 debugfs 的 Mode 抓到的）。
+            exe = f.name.endswith('.sh') or f.name in ('init', 'ueventd') or '/bin/' in ''.join(dests)
+            for d in dests:
+                if '/bin/' in d or exe:
+                    dbg(img, 'set_inode_field %s mode 100755' % d, write=True)
         report['placed'] = placed
         report['skipped_src'] = skipped
         print('已投递 mainline device 层：源文件 %d 份 -> 落点 %d 处（system 前缀=%s，vendor=%s）'

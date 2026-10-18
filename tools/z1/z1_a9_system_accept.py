@@ -190,6 +190,23 @@ def main():
             base = os.path.basename(want)
             hits = [p for p in allfiles if p.endswith(base) and '/bin/' in p]
             cand[want] = hits[0] if hits else None
+        # 光"文件在"不够：本轮就出过投进去的 /bin/init 是 0644 —— 交棒 exec 会直接失败。
+        noexec = []
+        for w, p in cand.items():
+            if not p:
+                continue
+            st = subprocess.run(['debugfs', '-R', 'stat %s' % p, str(raw)],
+                                capture_output=True, text=True, timeout=30).stdout
+            m = re.search(r'Mode:\s+(\d+)', st)
+            mode = m.group(1) if m else ''
+            # debugfs 打的是 Mode: 0755 这种四位八进制；判 x 要整值 & 0o111，
+            # 取 mode[-4] 会永远拿到前导 0（我第一版就这样把全绿的夹具判成丢权限）。
+            if mode and not (int(mode, 8) & 0o111):
+                noexec.append('%s(mode=%s)' % (p, mode))
+        if noexec:
+            v.fail('exec_bit', '这些 A9 关键件没有可执行位，exec 必失败: %s' % noexec[:6])
+        elif cand:
+            v.ok('exec_bit', '%d 项关键可执行文件权限位都带 x' % len([1 for x in cand.values() if x]))
         missing = [w for w, p in cand.items() if not p]
         if missing:
             v.fail('bins', '缺少 A9 必需可执行文件: %s' % ', '.join(

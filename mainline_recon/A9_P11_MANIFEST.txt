@@ -11,7 +11,7 @@ boot        = out/boot_mainline_a9p9b_D1_1b.img 962e131d0c6ea84303c56006c3dd249d
               ramdisk_a9p9.gz body=1,282,077 -> linux,initrd-end=0x8423901d
        5656576 d7b428c1fccdd9c09d8b416503524b9372ef396e8fa02ec9929374d90c04625a  out/A9_flashpkg_p11_android/boot.img
      929792000 ecbee094c1323d8fcfad41140588e9fadaa1678aef70eaeb2eb277e9340737b5  out/A9_flashpkg_p11_android/system.img
-     929792000 ecbee094c1323d8fcfad41140588e9fadaa1678aef70eaeb2eb277e9340737b5  out/a9sys_p11/system_mainline.img
+     929792000 2db80190461bd4b2c95946e75fe26cfc70f979a14a7135b542600b11431cce58  out/a9sys_p11/system_mainline.img
 
 闸门：z1_a9_system_accept.py --expect-adapted -> CHECKS=17 FAIL=0 WARN=2 SYS_ACCEPT=ACCEPT
       （WARN=target 机型名 phhgsi_arm_a 非 z1；WARN=sepolicy 只有 cil，故意不混投外来策略）
@@ -25,3 +25,17 @@ ramdisk 在包内 boot.img 里逐字节在位；从 dtb 反解 initrd-end=0x8423
 一处要说清的错：上一条提交(66b120a89..0eef02ed5) 的信息里写了"交棒的策略搜索路径已补
 $SYSROOT/etc/selinux/precompiled_sepolicy"，其实那两次 replace 都因转义没落上（我当时没断言），
 话说过头了。本条是真的补上了并跑过 HANDOFF_SELFTEST=ALL_PASS 8/8。
+
+最终审计又抓出一个会致命的错并修掉：adapter 投进 /bin 的 init/ueventd 之前是 **0644**（没执行位），
+交棒 exec 必失败。修法是 image_write 对 /bin 目标直接给 0755 + 后置 set_inode_field 兜一层；
+并把这条变成闸门判据：z1_a9_system_accept.py 新增 exec_bit（逐个 debugfs stat 查 x 位），
+自测加 CASE5（把镜像里 /system/bin/init 改成 0644 必须 REJECT）-> SELFTEST=ALL_PASS 5/5。
+八进制解析也修了一次：debugfs 的 Mode 是四位（0755），取 mode[-4] 永远拿到前导 0，
+第一版因此把全绿夹具判成丢权限 —— 这是"安全方向的错"，但同样是错。
+
+现在这份包的实测状态（复核方式=独立重算，不信脚本自述）：
+  boot.img   962e131d0c6ea84303c56006c3dd249d59ad9c39708ba9853e55f46e32986ea0  5,658,624 B（initrd-end 0x8423901d、bus-width 01、ramdisk 逐字节在位）
+  system.img 2db80190461bd4b2c95946e75fe26cfc70f979a14a7135b542600b11431cce58  929,792,000 B（/bin/init 0755 1,637,512 B、/bin/ueventd 0755、
+             8 项 A9 支柱可执行齐备、device 层 8 处落点读回一致）
+  SYS_ACCEPT=ACCEPT CHECKS=18 FAIL=0 WARN=2（target 机型名、sepolicy 只有 cil）
+  scatter: 仅 bootimg 与 android 为 true，其余 17 个分区全 false（含 preloader/uboot/usrdata）
