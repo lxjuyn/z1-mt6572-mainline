@@ -1,0 +1,17 @@
+# A9 P11 构建台账 2026-10-18 (真 A9 用户态 + A9 PID1 到位，出可刷安卓包)
+
+branch=wip/a9-mainline HEAD=66b120a89bc1595cc875631e1d6580e8adee7757 kernelrelease=7.0.0-rc7-z1+
+
+system 原料 = phhusson GSI v123 (AOSP 9.0/API28/armeabi-v7a, A-only)，裁剪+resize 到 929,792,000 B
+PID1 来源   = lxjuyn/z1-android9 release Linux7-20261006-r2 的 boot.img ramdisk 里的 init(1,637,512 B, EM_ARM 静态)；
+              ueventd 用同一 ELF 的副本（上游是 symlink 到 init）；不入库，只在本地当输入件。
+boot        = out/boot_mainline_a9p9_D1_1b.img d7b428c1…（P9 交棒链，eMMC 1-bit 安全基线）
+       5656576 d7b428c1fccdd9c09d8b416503524b9372ef396e8fa02ec9929374d90c04625a  out/A9_flashpkg_p11_android/boot.img
+     929792000 ecbee094c1323d8fcfad41140588e9fadaa1678aef70eaeb2eb277e9340737b5  out/A9_flashpkg_p11_android/system.img
+     929792000 ecbee094c1323d8fcfad41140588e9fadaa1678aef70eaeb2eb277e9340737b5  out/a9sys_p11/system_mainline.img
+
+闸门：z1_a9_system_accept.py --expect-adapted -> CHECKS=17 FAIL=0 WARN=2 SYS_ACCEPT=ACCEPT
+      （WARN=target 机型名 phhgsi_arm_a 非 z1；WARN=sepolicy 只有 cil，故意不混投外来策略）
+装包：z1_a9_flashpkg.sh rc=0，scatter 只放行 bootimg,android；9 个分区强制不下载；回滚件 1/boot.img 在位
+回归：SPARSE_SELFTEST=ALL_PASS 5/5；SYS_ACCEPT 自测 4/4；HANDOFF_SELFTEST=ALL_PASS 8/8
+未做：上板。SELinux 载入、/vendor(symlink) 处理、HIDL manifest 落位三条仍待串口证据。

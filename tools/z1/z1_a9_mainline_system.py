@@ -311,6 +311,9 @@ def main():
             # 由交棒脚本在运行时把它放进可写的 /vendor/manifest.xml。
             'manifest.xml': ([VP + '/manifest.xml'] if VP else [P + '/etc/z1_device_manifest.xml']),
             'z1_usb_setup.sh': [P + '/bin/z1_usb_setup.sh'],
+            # A9 的 precompiled 策略：只在本仓 rootdir/ 下**确实放了这份输入件**时才投；
+            # GSI 配的是它自己的 cil（与 LOS16 策略不同源），所以默认不混投，见 A9_P11_MANIFEST。
+            'precompiled_sepolicy': [P + '/etc/selinux/precompiled_sepolicy'],
         }
         # A-only 的 GSI 不带 A9 自己的 PID1（init/ueventd），而整机能不能起就卡在这两个二进制上。
         # 所以把它们做成**普通输入件**：仓里放了就一并投进 <P>/bin，没放就照常报缺。
@@ -323,7 +326,12 @@ def main():
                 report['notes'].append('缺输入件 %s（A-only GSI 不提供 A9 的 PID1，'
                                        '补上后本机就能把 system 改成自足版）' % f.relative_to(WT))
         placed, skipped = [], []
-        for f in sorted(x for x in MAINLINE_ROOTDIR.iterdir() if x.is_file()):
+        srcs = [x for x in MAINLINE_ROOTDIR.iterdir() if x.is_file()]
+        for nm in ('init', 'ueventd'):
+            f = SEED / nm
+            if f.is_file():
+                srcs.append(f)          # 输入件在 bin/ 子目录里，不一起列进来就永远投不出去
+        for f in sorted(srcs, key=lambda x: x.name):
             dests = TARGETS.get(f.name)
             if dests is None:
                 skipped.append((f.name, '本工具没有为它定义落点'))
@@ -353,7 +361,7 @@ def main():
         report['placed'] = placed
         report['skipped_src'] = skipped
         print('已投递 mainline device 层：源文件 %d 份 -> 落点 %d 处（system 前缀=%s，vendor=%s）'
-              % (len([x for x in MAINLINE_ROOTDIR.iterdir() if x.is_file()]), len(placed), P or '(根即 system)', VP or '无'))
+              % (len(srcs), len(placed), P or '(根即 system)', VP or '无'))
         if skipped:
             report['notes'].append('未定义落点的源文件: %s' % skipped)
         report['notes'].append('A9 具体扫描的 rc/ueventd/manifest 路径本机无法离线确认，'
