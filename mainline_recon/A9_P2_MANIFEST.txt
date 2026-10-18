@@ -1,0 +1,34 @@
+# A9 P2 构建台账 2026-10-18 (体积工程 + 可复现变体)
+branch=wip/a9-mainline  baseline=ffdff0653(main)  P1_HEAD=1dd39867a
+config_sha256=4cc95cdf76d1896a453b487df6ec6893d46b332040280e47452532427214c78f
+kernelrelease=7.0.0-rc7-z1+   vermagic=7.0.0-rc7-z1+ SMP mod_unload ARMv7 p2v8
+
+## 内核与 ramdisk
+4555264 7cda53a47f6d662dbd3e34b2cb66703f52e2917e1fc76f8a92fb6473d514c8fa zImage      (P1 为 4772352/20444647d4936578，本轮 -217088)
+  19796 (D1 内嵌) / 19808 (D4 内嵌, =树内文件) mt6572-z1.dtb
+  19808 5e16ea6c8cf5aca0e3a4cf42a36c4af172d840fe71e08842032287174b6a5c09 dtb(树内=4-bit+androidboot)
+1276535 2d066f75d7255722d7803d384c09b0423344b5bb7c00c83f928d2aefca81a676 ramdisk_a9p1.gz (body 1276023, initrd-end 0x84237877)
+
+## 出片（boot 分区上限 6291456）
+5857280 13f75dcd7231e941868dca421dd6135e07b8e5350aed6045f7009a0a2e678f7e out/boot_mainline_a9p2_D1_1b.img  余量 434176
+5857280 464b1e281aea7cf401f46929d8ea1d3de1a003268dfa4ad703449ef28e90b6b6 out/boot_mainline_a9p2_D4_4b.img  余量 434176
+两图唯一实质差异 = &mmc0 的 bus-width <1>/<4> + mmc0_pins 组的 DAT1-3 pinmux；validate 均 RESULT: VALID。
+A9 generic ramdisk 可用上限 ≈ 1276535 + 434176 = 1710711 B（P1 时只有 1499296 B）。
+
+## .ko 交付（与本轮 zImage 同编，非 P1 遗留）
+10572 xt_quota2.ko   vermagic=7.0.0-rc7-z1+ SMP mod_unload ARMv7 p2v8
+14552 xt_IDLETIMER.ko vermagic 同上
+归档=bridge_backups/products/a9p2_20261018_093818/（zImage/dtb/.config/两镜像/ramdisk/ko）
+
+## 与 P1 的差异（本轮裁了什么、哪些没裁动）
+已确认从 vmlinux.a 消失: MTD(含 NAND/DENALI/BRCMNAND/SPI_NOR/FTL/BCH)、HID(hid-debug 等)、input/mouse、KEXEC/CRASH_DUMP
+仍被 select 拖住未生效: CONFIG_ARCH_OMAP、CONFIG_SERIO（mach-omap2 仍有 87 个内建对象）
+刻意未动: CONFIG_DRM/DRM_LIMA —— CONFIG_SYSFB 是无提示 bool，靠 DRM=y 一路 select；
+          把 DRM 降级 =m 会让 SYSFB 从配置里消失，直接威胁 Android 显示链，不为省空间赌它。
+A9 符号门: 用 scripts/extract-ikconfig 从**产物 vmlinux** 反抠配置复核 26 项全在（含 BPF_SYSCALL/SECCOMP_FILTER/
+           FB_SIMPLE/SYSFB/GENERIC_IRQ_CHIP/RFKILL_INPUT/ARM_APPENDED_DTB），非仅看 .config。
+
+## 勘误（重要）
+P1 台账称镜像 C = "A + androidboot（1-bit 不变）"。本轮从三个镜像里反解内嵌 DTB 实测：
+  A=bus-width 1, B=4, C=4 —— 即 C 实为 **B + androidboot**，单变量差分被破坏（dts 在出 B 时留在 4-bit 状态，
+  C 只是在其上追加 bootargs）。P2 因此把变体做成显式参数，并在打包**之后**反解镜像内嵌 DTB 复核。
