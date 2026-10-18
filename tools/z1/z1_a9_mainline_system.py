@@ -381,6 +381,21 @@ def main():
                     report['actions'].append(entry)
                     continue
                 if exists(img, dest):
+                    # 权威 system（r2 那份）本来就带 /system/bin/init、/bin/ueventd(symlink)。
+                    # 拿副本 rm+write 覆盖会把符号链接变成 1.6 MB 的普通文件 —— 功能等价但
+                    # 白占 3 MB 并改动镜像原状。所以"已存在且看着可用"就跳过，只补真缺的。
+                    st = dbg(img, 'stat %s' % dest).decode(errors='replace')
+                    typ = (re.search(r'Type:\s+(\S+)', st) or ['', ''])[1]
+                    size = int((re.search(r'Size:\s+(\d+)', st) or ['', '0'])[1])
+                    PRESERVE = ('init', 'ueventd')   # 只有 ELF 副本让位给原件
+                    if (typ in ('dir',) or size > 0) and os.path.basename(dest) in PRESERVE:
+                        entry['skipped'] = '镜像里已有 %s(Type=%s Size=%d)，不用副本覆盖' % (dest, typ, size)
+                        report['actions'].append(entry)
+                        report['notes'].append('%s 已存在，跳过：%s' % (dest, entry['skipped']))
+                        print('SKIP %s（镜像里已有，Type=%s Size=%d）' % (dest, typ, size))
+                        continue
+                    before = dbg(img, 'cat %s' % dest)
+                    entry['overwrote'] = {'sha256_before': sha(before), 'bytes_before': len(before)}
                     dbg(img, 'rm %s' % dest, write=True)
                 back = image_write(img, tmp, dest, mode='0755' if ('/bin/' in dest or f.name in ('init', 'ueventd')) else '0644')
                 if back != content:
