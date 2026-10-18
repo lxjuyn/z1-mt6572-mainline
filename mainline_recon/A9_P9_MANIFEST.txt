@@ -1,0 +1,21 @@
+# A9 P9 构建台账 2026-10-18 (交棒链：不等 AOSP ramdisk 也能拉起 A9 system)
+
+branch=wip/a9-mainline HEAD=be10d0c19e4d7194e0bb073bd0b8cbe526d1d60f kernelrelease=7.0.0-rc7-z1+
+
+     4350464  a9_wt/arch/arm/boot/zImage
+     5656576  out/boot_mainline_a9p9_D1_1b.img
+     5656576  out/boot_mainline_a9p9_D4_4b.img
+     1280825  out/ramdisk_a9p9.gz
+  sha 3ecb439c0c8ec51711d6eaeea433ce89be47024bd6467361a43916676e366615  out/ramdisk_a9p9.gz
+  sha 84645edaeff808ae1e219b4be4b1a131883eda2e51d6f03e227e1a8495138897  out/boot_mainline_a9p9_D1_1b.img
+  sha 69065082e40945b9c7c829253fdd130f0d1456dd6bd1a68055bcc6974b143e85  out/boot_mainline_a9p9_D4_4b.img
+  sha c0084f1e3251ef15ae1caeb0f006f801f8c6f9daf506b8c7301c1ad15fb1a9f7  a9_wt/arch/arm/boot/zImage
+
+新增：tools/z1/z1_a9_handoff.sh(probe|go)、z1_a9_mkramdisk.sh(装配前 sh -n + 成品回读对账)、
+      init_v13_9_a9handoff.src([a9hand] 段 + 把 [a9dev] 搬出 else)、两份 selftest。
+ramdisk body 1,280,313 -> dts initrd-end=0x84238939（dts 已随之改写并入库）。
+镜像 5,656,576 B（p8 5,652,480，+4,096）；boot 余量 634,880 B；A9 ramdisk 上限 1,917,100 B。
+两变体 RESULT: VALID + VERIFY=OK(bus-width 01/04、androidboot 两参、initrd-end 反解一致) + PAYLOAD-OK 双载荷逐字节。
+包：out/A9_flashpkg_p9_D1、out/A9_flashpkg_p9_D4（boot-only，scatter 只放行 bootimg）。
+判据回归：HANDOFF_SELFTEST=ALL_PASS 7/7；SYS_ACCEPT 侧 SYS=ALL_PASS 4/4（含真 4.4 镜像 REJECT）。
+板上判据见 mainline_recon/A9_HANDOFF_20261018.md §4；未上板。

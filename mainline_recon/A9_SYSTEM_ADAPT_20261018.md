@@ -121,3 +121,11 @@ python3 tools/z1/z1_a9_system_accept.py <system.img>          # 只读，不改�
 但**不放 ROM**；`update.lineageos.org` 现在连 DNS 都解析不了；`download.lineageos.org`
 对**任意路径**都回同一份 723 B 的 Vue 壳（`index.json`、`/m7/` 都一样），所以它的 200
 不代表可达。结论仍是：本机弄不到 A9 arm32 的 system 原料，卡点在出网面不在"32 位 A9 不存在"。
+
+## 9. P9 之后：只要 system，不要 ramdisk
+
+交棒链（`A9_HANDOFF_20261018.md`）已把 first-stage 的必要职责搬进本机自己的 bring-up ramdisk，
+所以**上面 §8 那份"交 system.img + A9 generic ramdisk"的清单缩成一条：只交 system.img**。
+boot.img 用本机 P9 出片（`out/boot_mainline_a9p9_D1_1b.img` / `..._D4_4b.img`），
+刷完由 `[a9hand] RESULT_STEP_handoff_probe=GO` 决定是否进 A9；判定不过原样落回调试 shell。
+

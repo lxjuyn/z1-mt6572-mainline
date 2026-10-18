@@ -1,0 +1,227 @@
+#!/bin/busybox sh
+# Very small init: bring up USB ACM gadget console (configfs) + recovery shell
+# v13.3: replaced dead MTK android_usb sysfs block with mainline configfs ACM.
+# v13.3b (review fixes): full [acm] self-reporting incl. ln -s result,
+# tty0 getty guarded by [ -e /dev/tty0 ].
+# v13.4r (review fix 2026-08-29): PID1 console getty now respawns in a loop
+# (was: single exec; shell exit killed PID1 -> panic=10 full reboot).
+# v13.5 (2026-08-29): kernel-log-over-USB mirror ([klog]) on /dev/ttyGS0 for
+# S6 (no UART testpoints): dmesg ring dump + live tail -f /proc/kmsg.
+# v13.6/s6_v6 (2026-08-29): pstore/ramoops spool. Mounts /sys/fs/pstore early
+# (after proc/sysfs); inside the [klog] block, BEFORE dmesg, replays any
+# previous-crash console-ramoops-0 capture out over /dev/ttyGS0.
+# v13.9-a9hand (2026-10-18): [a9hand] PID1 交棒给 A9 system；并把 [a9dev]
+#   运行时节点段搬出 else（原先只在 /proc/config.gz 缺失时才打印，IKCONFIG
+#   一生效这些证据就全丢了）。
+# v13.7/s6_v7 (2026-08-30): REPLAY-FIRST TIMING ROOT-CAUSE FIX. v13.6 ran the
+# pstore/klog replay and the interactive getty CONCURRENTLY on /dev/ttyGS0;
+# the replay text was fed into the shell stdin, spewing tens of
+# thousands of "~ #" prompts + "sh: syntax error" until the shell died and
+# the port went unresponsive. Fix: the whole replay (previous-crash ramoops +
+# [klog] banners + full dmesg) now runs BLOCKING and COMPLETES before the
+# tail -f mirror and the ttyGS0 getty are started, so replay bytes can never
+# race a shell stdin. Hardening: stty -echo on ttyGS0 before getty. PID1
+# console getty respawn loop, mdev, banners etc. unchanged.
+busybox mount -t proc proc /proc 2>/dev/null
+busybox mount -t sysfs sysfs /sys 2>/dev/null
+busybox mount -t tmpfs tmpfs /dev 2>/dev/null
+busybox mdev -s 2>/dev/null
+
+BB=/bin/busybox
+$BB echo "[init] welcome to the Z1 Linux bringup initramfs (v13.3 acm)"
+$BB echo "[init] uname: $($BB cat /proc/version 2>/dev/null)"
+
+# v13.6: mount pstore right after proc/sysfs so the ramoops records from the
+# previous (crashed) boot are visible before the replay block spools them out.
+$BB mount -t pstore pstore /sys/fs/pstore 2>/dev/null
+if [ -e /sys/fs/pstore ]; then
+  $BB echo "[pstore] /sys/fs/pstore mounted, records: $($BB ls /sys/fs/pstore 2>/dev/null | $BB tr '\n' ' ')"
+else
+  $BB echo "[pstore] mount FAILED (dts ramoops node missing?)"
+fi
+
+# [a9dev] 运行时节点存在性：证明"编进去了"之外，节点真的被创建出来。
+# 逐项对应本轮补上的 Android 前置(TUN/VpnService、watchdog/init.z1.rc 的 watchdogd、
+# fb0/LK 遗留 framebuffer 经 FB_SIMPLE、binder 三域由驱动静态注册而非 binderfs)。
+for _d in /dev/net/tun /dev/watchdog /dev/fb0 /dev/graphics/fb0 /dev/binder /dev/hwbinder \
+          /dev/vndbinder /dev/ashmem /dev/dma_heap/system /dev/dma_heap/system-uncached; do
+  if [ -e "$_d" ]; then $BB echo "[a9dev] $_d=YES"; else $BB echo "[a9dev] $_d=MISSING"; fi
+done
+$BB ls /sys/class/net 2>/dev/null | $BB tr '\n' ' ' | $BB sed 's/^/[a9net] ifaces=/' > /dev/console
+$BB cat /proc/cgroups 2>/dev/null | $BB grep -E '^(rt|memory|freezer|cpuset|cpu|devices)[[:space:]]' | $BB sed 's/^/[a9cgrp] /' > /dev/console
+$BB grep -c . /proc/devices 2>/dev/null | $BB sed 's/^/[a9dev] proc_devices_lines=/' > /dev/console
+
+# ---------------------------------------------------------------------------
+# v13.8-a9: Android 9 内核能力探针（无 AOSP 也能取板级真值）。
+# 运行时机：mdev 之后、ACM 回放与 getty 之前 —— 复用 v13.7 的"回放先行、shell 后起"
+# 时序，绝不把探针文本灌进尚不存在的 shell stdin（v13.6 就是死在这里）。
+# 输出：/dev/console(=ttyS0, dts chosen bootargs 决定) 直接可见；同时存 /a9probe.txt,
+# 由下面 [klog] 阻塞回放段 spool 到 /dev/ttyGS0，S6 那种无串口触点也能拿到。
+# ---------------------------------------------------------------------------
+if [ -x /sbin/z1_a9_probe ]; then
+  $BB echo "[a9probe] run start" > /dev/console
+  /sbin/z1_a9_probe > /a9probe.txt 2>&1
+  PR=$?
+  $BB cat /a9probe.txt > /dev/console
+  $BB echo "[a9probe] run done rc=$PR" > /dev/console
+else
+  $BB echo "[a9probe] /sbin/z1_a9_probe ABSENT (ramdisk 未打包探针)" > /dev/console
+fi
+
+# 板端自证编译配置：/proc/config.gz 是"证①"在板上的对应物，
+# 用来区分"内核没编进去"与"编进去了但运行时不可用"。
+CFGRE='^(CONFIG_(ANDROID_BINDER_IPC|ANDROID_BINDER_DEVICES|ANDROID_ASHMEM|SECURITY|SECURITY_NETWORK|SECURITY_SELINUX|SECURITYFS|AUDIT|AUDITSYSCALL|MEMCG|CGROUP_FREEZER|CGROUP_CPUACCT|CPUSETS|CGROUP_SCHED|FAIR_GROUP_SCHED|CGROUP_DEVICE|CGROUP_BPF|FUSE_FS|EXT4_FS_SECURITY|TMPFS_XATTR|NETFILTER|NETFILTER_ADVANCED|NETFILTER_XTABLES|IP_NF_IPTABLES|NF_CONNTRACK|NETFILTER_XT_MATCH_QUOTA2|NETFILTER_XT_TARGET_IDLETIMER|IPV6|XFRM|XFRM_USER|BLK_DEV_DM|DM_VERITY|ZRAM|ZSMALLOC|IKCONFIG|IKCONFIG_PROC|BPF_SYSCALL|SECCOMP_FILTER|KEYS|FS_ENCRYPTION|DMABUF_HEAPS|DMABUF_HEAPS_SYSTEM|DMABUF_HEAPS_CMA|UTS_NS|IPC_NS|PID_NS|NET_NS|POSIX_MQUEUE|NETDEVICES|NET_CORE|TUN|FS_POSIX_ACL|EXT4_FS_POSIX_ACL|NETFILTER_XTABLES_LEGACY|IP_NF_IPTABLES_LEGACY|IP_NF_FILTER|IP_NF_MANGLE|IP_NF_NAT|IP6_NF_IPTABLES_LEGACY|IP6_NF_FILTER|NETFILTER_XT_MATCH_OWNER|NETFILTER_XT_MATCH_CGROUP|NETFILTER_XT_MATCH_SOCKET|MEDIATEK_WATCHDOG|RT_GROUP_SCHED|FB_SIMPLE|SYSFB|ARM_APPENDED_DTB|MACH_MT6572|GENERIC_IRQ_CHIP|RFKILL_INPUT)=|# CONFIG_(ANDROID_BINDERFS|SECURITY_SELINUX|DMABUF_HEAPS) is not set)$'
+if [ -e /proc/config.gz ]; then
+  $BB echo "[a9cfg] ===== /proc/config.gz 自证开始 =====" > /dev/console
+  $BB zcat /proc/config.gz 2>/dev/null | $BB grep -E "$CFGRE" > /dev/console
+  $BB echo "[a9cfg] ===== 自证结束 =====" > /dev/console
+else
+  $BB echo "[a9cfg] RESULT_STEP_cfg_proc_config_gz=FAIL(无 /proc/config.gz, CONFIG_IKCONFIG_PROC 未生效?)" > /dev/console
+
+fi
+
+# ---------------------------------------------------------------------------
+# v13.9-a9hand：交棒给 android 分区里的 A9 userspace（若确有一份 arm32 A9）。
+# 时机：探针/自证之后、ACM 与 getty 之前 —— 判定通过就 exec 顶掉 PID1，不再起我们的 shell；
+# 判定不过（没刷 A9 system / sdk 不是 28 / 那是 arm64 的镜像）原样落回调试 shell，
+# 所以这张镜像对"只刷 boot"的旧用法零风险。逐条证据由脚本自己打到 /dev/console。
+# 为什么要它：mainline 线原本等另一台机器交来 A9 generic ramdisk(first-stage init)，
+# 本机出网面拿不到；顶掉 first-stage 的必要职责后，手里只要有一份 A9 system.img 就能起。
+# ---------------------------------------------------------------------------
+if [ -x /sbin/z1_a9_handoff.sh ]; then
+  $BB echo "[a9hand] 交棒判定开始" > /dev/console
+  if /sbin/z1_a9_handoff.sh probe; then
+    $BB echo "[a9hand] 判定通过，exec 交棒（下面起是 A9 init 自己的日志）" > /dev/console
+    exec /sbin/z1_a9_handoff.sh go
+  fi
+  $BB echo "[a9hand] 判定未过，继续走调试 shell（下面起是 ACM/getty）" > /dev/console
+else
+  $BB echo "[a9hand] /sbin/z1_a9_handoff.sh ABSENT（ramdisk 未打包交棒脚本）" > /dev/console
+fi
+
+# ---------------------------------------------------------------------------
+# configfs CDC-ACM gadget -> /dev/ttyGS0
+# The stock android_usb sysfs interface does not exist in mainline, so build
+# the gadget through configfs and bind it to the MUSB UDC.
+# ---------------------------------------------------------------------------
+CFG=/sys/kernel/config/usb_gadget
+
+$BB mount -t configfs configfs /sys/kernel/config 2>/dev/null && \
+  $BB echo "[acm] configfs mounted" || $BB echo "[acm] configfs mount FAILED"
+
+$BB mkdir -p $CFG/z1 && \
+  $BB echo "[acm] gadget dir created" || $BB echo "[acm] gadget dir FAILED"
+$BB echo 0x0e8d > $CFG/z1/idVendor
+$BB echo 0x2006 > $CFG/z1/idProduct
+$BB echo 0x0200 > $CFG/z1/bcdUSB
+$BB echo 0x0100 > $CFG/z1/bcdDevice
+$BB echo "[acm] VID 0x0e8d / PID 0x2006 set"
+$BB mkdir -p $CFG/z1/strings/0x409
+$BB echo "Z1MT65720001" > $CFG/z1/strings/0x409/serialnumber
+$BB echo "Z1"           > $CFG/z1/strings/0x409/manufacturer
+$BB echo "Z1 ACM"       > $CFG/z1/strings/0x409/product
+$BB mkdir -p $CFG/z1/configs/c.1/strings/0x409 && \
+  $BB echo "[acm] configs/c.1 created" || $BB echo "[acm] configs/c.1 FAILED"
+$BB echo "ACM" > $CFG/z1/configs/c.1/strings/0x409/configuration
+$BB echo 120   > $CFG/z1/configs/c.1/MaxPower
+$BB mkdir $CFG/z1/functions/acm.usb0 && \
+  $BB echo "[acm] acm function created" || \
+  $BB echo "[acm] acm function FAILED(kernel missing CONFIG_USB_CONFIGFS_ACM?)"
+$BB ln -s $CFG/z1/functions/acm.usb0 $CFG/z1/configs/c.1/ && \
+  $BB echo "[acm] acm linked into c.1" || $BB echo "[acm] acm link FAILED"
+
+UDC=$($BB ls /sys/class/udc 2>/dev/null | $BB head -n1)
+$BB echo "[acm] UDC detected: $UDC"
+if [ -n "$UDC" ]; then
+  $BB echo "$UDC" > $CFG/z1/UDC && \
+    $BB echo "[acm] UDC bound" || $BB echo "[acm] UDC bind FAILED"
+else
+  $BB echo "[acm] NO UDC found"
+fi
+
+# Re-scan devtmpfs after UDC bind so /dev/ttyGS0 shows up.
+$BB mdev -s 2>/dev/null
+
+# ---------------------------------------------------------------------------
+# v13.7: REPLAY FIRST, THEN SHELL.
+# Step 1: wait for /dev/ttyGS0 (appears only after configfs/UDC bind),
+# poll + timeout soft-fail, same spirit as v13.6.
+# Step 2: BLOCKING replay of every pre-recorded byte:
+#         [pstore] previous-crash console-ramoops-0 (if any),
+#         [klog]   three banners + full dmesg ring dump.
+# Step 3: only now start the background live mirror (tail -f /proc/kmsg)
+#         and the getty respawn loop. Replay bytes can never land in a
+#         shell stdin that does not exist yet.
+# ---------------------------------------------------------------------------
+GS=0
+i=0
+while [ $i -lt 20 ]; do
+  [ -e /dev/ttyGS0 ] && GS=1 && break
+  $BB sleep 1
+  i=$((i+1))
+done
+if [ $GS -eq 1 ]; then
+  $BB echo "[acm] /dev/ttyGS0 ready"
+
+  # Hardening: kill local echo on the gadget port BEFORE any getty/shell
+  # opens it, so host-side echoes can never be reflected into a shell
+  # stdin. busybox stty supports -F and -echo/-echoe/-echok; if this
+  # build ever lacks them, fall back to `stty raw` (echo off too).
+  if ! $BB stty -F /dev/ttyGS0 -echo -echoe -echok 2>/dev/null; then
+    $BB stty -F /dev/ttyGS0 raw 2>/dev/null && \
+      $BB echo "[acm] stty raw fallback applied" || \
+      $BB echo "[acm] stty unavailable (nonfatal)"
+  fi
+
+  # --- blocking replay (foreground, no shell running yet) ---
+  if [ -e /sys/fs/pstore/console-ramoops-0 ]; then
+    $BB echo "[pstore] === previous crash console log follows ===" > /dev/ttyGS0
+    $BB cat /sys/fs/pstore/console-ramoops-0 > /dev/ttyGS0
+    $BB echo "[pstore] === previous crash console log ends ===" > /dev/ttyGS0
+  else
+    $BB echo "[pstore] no previous console-ramoops-0 record" > /dev/ttyGS0
+  fi
+  if [ -e /a9probe.txt ]; then
+    $BB echo "[a9probe] === spool /a9probe.txt to ACM ===" > /dev/ttyGS0
+    $BB cat /a9probe.txt > /dev/ttyGS0
+  else
+    $BB echo "[a9probe] no /a9probe.txt to spool" > /dev/ttyGS0
+  fi
+  $BB echo "[klog] === dumping kernel ring buffer to ACM ===" > /dev/ttyGS0
+  $BB dmesg > /dev/ttyGS0
+  $BB echo "[klog] === replay done, live tail + shell follow ===" > /dev/ttyGS0
+
+  # --- live mirror: started AFTER the replay finished ---
+  $BB setsid $BB sh -c '
+    echo "[klog] === live tail /proc/kmsg begins ==="
+    exec /bin/busybox tail -f /proc/kmsg >> /dev/ttyGS0
+  ' </dev/null >/dev/null 2>&1 &
+  $BB echo "[klog] live mirror launched (pid $!)"
+
+  # interactive getty respawn loop on the gadget port (background)
+  $BB setsid $BB sh -c '
+    while :; do
+      /bin/busybox getty -n -l /bin/sh 115200 ttyGS0 vt100 2>/dev/null
+      /bin/busybox sleep 1
+    done
+  ' </dev/null >/dev/null 2>&1 &
+else
+  $BB echo "[acm] /dev/ttyGS0 still missing after wait, skipping ACM replay/shell"
+fi
+
+# tty0 getty (framebuffer console, only if present). Note: /dev/console does
+# NOT land here — dts chosen bootargs put console=ttyS0,921600n8 last, so
+# /dev/console == ttyS0 (serial UART). tty0 is a secondary display path only.
+if [ -e /dev/tty0 ]; then
+  $BB setsid $BB sh -c 'exec /bin/busybox getty -n -l /bin/sh 0 tty0 vt100 2>/dev/null' </dev/tty0 >/dev/tty0 2>&1 &
+else
+  $BB echo "[acm] /dev/tty0 absent, skipping tty0 getty"
+fi
+
+# Fallback forensics shell on /dev/console. Per dts chosen bootargs that is
+# ttyS0 (serial UART @921600), NOT tty0 — W1 fix moved console into dts.
+# respawn loop: PID1 must never exit (review fix 2026-08-29)
+while :; do
+  $BB getty -n -l /bin/sh 0 console vt100 2>/dev/null
+  $BB sleep 1
+done
