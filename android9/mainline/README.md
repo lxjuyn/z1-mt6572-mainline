@@ -103,6 +103,22 @@ rc 里的 `mount binderfs` 一律 REJECT —— 前两个是 stock 线代偿，�
 `pack` 会按**实际 body** 现算 initrd-end、回写 dts、重编 dtb、跑 6 MB 预算闸门、
 打包后再从镜像里反解内嵌 DTB 复核（`VERIFY=OK` 才算交付）。
 
+## 3b. system.img 侧：本机也能做一部分（镜像级改造，不需要源码树）
+
+stock 那套代偿是**由镜像内的门控驱动的**（`/z1_stock_kernel` 标记 + `ro.z1.stock_kernel` 属性 +
+rc 里 `disabled` 掉的 hwservicemanager）。所以你们交来 A9 `system.img` 后，本机可以在 ext4 上
+就地撤代偿，不用重编：
+
+```sh
+python3 tools/z1/z1_a9_mainline_system.py --system <system.img> --out out/a9sys
+```
+
+它做五步（每步读回校验、失败即中止）：删标记 → 去掉 hwservicemanager/vndservicemanager 的
+`disabled` → 投递本目录 rootdir 那 6 份 mainline 文件到 `/system/etc/` →
+从 `build.prop` 移除 `ro.z1.stock_kernel=1`（**光删标记不够，属性写死时门控照开**）→
+`e2fsck` + 尺寸闸门，输出 `ADAPT_REPORT.json`。若你们已经用"撤销补丁"的方式重建过 system，
+这几步会是空操作，工具会如实报"没找到标记"。详见 `mainline_recon/A9_SYSTEM_ADAPT_20261018.md`。
+
 ## 4. 预算（硬约束，先算再做）
 
 P4 实测：zImage 4,612,608 + dtb 19,796/19,808 + 探针 ramdisk 1,276,824 → 镜像 5,914,624 B，
