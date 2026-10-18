@@ -8,9 +8,12 @@
 判据分三层：
  L1 封装：要么带 512B MTK ROOTFS 头(magic 88 16 88 58 + 0x08 处 ROOTFS + 0x04 小端长度==body)，
          要么是裸 gzip/newc cpio。两种都认，但带头的必须长度自洽。
- L2 A9 first-stage 形状（缺一律 REJECT）：
-         /init 是 32-bit ARM 静态 ELF；有 first_stage_*.rc 或 init.*.rc；有 sepolicy；
-         有 fstab.*；有 ueventd.rc。
+ L2 形状判据分两种（尺子不同，别混）：
+     A) A9 first-stage：/init 是 32-bit ARM 静态 ELF；有 first_stage_*.rc 或 init.*.rc；
+        有 sepolicy；有 fstab.*；有 ueventd.rc。
+     B) 本机 bring-up + 交棒型：/init 是 busybox sh 脚本且含 [a9hand]，必须有 /bin/busybox、
+        /sbin/z1_a9_handoff.sh(判定版)与 /sbin/z1_a9_probe；此时 sepolicy/fstab 由交棒从
+        /system 侧取，所以不再按 A) 判死。
  L3 语义红线（出现即 REJECT，因为都是 stock 线或错误路线留下的东西）：
          解出文件里有 /z1_stock_kernel 标记、ro.z1.stock_kernel 字符串，
          或 rc 里出现 `mount binderfs`（本内核 ANDROID_BINDERFS=n，节点由驱动静态注册）。
@@ -94,20 +97,38 @@ def main():
         def find(pat):
             return [k for k in files if re.search(pat, k)]
 
-        # /init
-        inits = [k for k in ('init', 'init.rc') if k in files]
-        if 'init' not in files:
-            bad.append('没有 /init')
-        elif not is_arm_static_elf(files['init']):
-            bad.append('/init 不是 ARM 静态 ELF: ' + sh(['file', '-b', files['init']]).stdout.strip())
-        if not find(r'first_stage.*\.rc$') and not find(r'^init\..*\.rc$'):
-            bad.append('既无 first_stage_*.rc 也无 init.*.rc（不像 A9 first-stage ramdisk）')
-        if not find(r'(^|/)sepolicy$'):
-            bad.append('缺 sepolicy（A9 首阶段策略，缺了 init 加载不上）')
-        if not find(r'(^|/)fstab\.'):
-            bad.append('缺 fstab.*（mount_all 无来源）')
-        if not find(r'(^|/)ueventd\.rc$'):
-            warn.append('没有 ueventd.rc —— 若走 /system/etc/ueventd.rc 可接受，需人工确认')
+        # ---- 先分形状：两种合法形状，判据不同，别拿 A9 first-stage 的尺去量交棒型 ----
+        # A) A9 generic ramdisk：/init 是 ARM 静态 ELF，带 first_stage_*.rc / sepolicy / fstab
+        # B) 本机 bring-up + 交棒型：/init 是 busybox sh 脚本，靠 /sbin/z1_a9_handoff.sh
+        #    顶掉 first-stage 职责（策略载入与 fstab 都从 /system 侧取，见 A9_HANDOFF_20261018.md）
+        handoff = ('init' in files and any(k.endswith('z1_a9_handoff.sh') for k in files)
+                   and b'[a9hand]' in open(files['init'], 'rb').read())
+        if handoff:
+            print('L2 形状: bring-up + 交棒型（非 A9 first-stage）')
+            if is_arm_static_elf(files['init']):
+                bad.append('交棒型的 /init 应当是 busybox sh 脚本，这里却是 ELF —— 形状判错')
+            for need, why in (('/bin/busybox', '/init 全靠它'),
+                              ('sbin/z1_a9_handoff.sh', '交棒判据与挂载动作'),
+                              ('sbin/z1_a9_probe', '板级能力探针，交棒前 must run')):
+                if need.lstrip('/') not in files:
+                    bad.append('交棒型缺 %s（%s）' % (need, why))
+            hpath = [k for k in files if k.endswith('z1_a9_handoff.sh')][0]
+            if b'RESULT_STEP_handoff_probe=GO' not in open(files[hpath], 'rb').read():
+                bad.append('%s 里没有 RESULT_STEP_handoff_probe=GO，不是判定版' % hpath)
+        else:
+            if 'init' not in files:
+                bad.append('没有 /init')
+            elif not is_arm_static_elf(files['init']):
+                bad.append('/init 不是 ARM 静态 ELF: ' + sh(['file', '-b', files['init']]).stdout.strip())
+            if not find(r'first_stage.*\.rc$') and not find(r'^init\..*\.rc$'):
+                bad.append('既无 first_stage_*.rc 也无 init.*.rc，且没有交棒脚本 —— '
+                           '既不像 A9 first-stage，也不是带 [a9hand] 的 bring-up')
+            if not find(r'(^|/)sepolicy$'):
+                bad.append('缺 sepolicy（A9 首阶段策略，缺了 init 加载不上）')
+            if not find(r'(^|/)fstab\.'):
+                bad.append('缺 fstab.*（mount_all 无来源）')
+            if not find(r'(^|/)ueventd\.rc$'):
+                warn.append('没有 ueventd.rc —— 若走 /system/etc/ueventd.rc 可接受，需人工确认')
 
         # L3 语义红线
         stockish, binderfs, ionrefs = [], [], []
