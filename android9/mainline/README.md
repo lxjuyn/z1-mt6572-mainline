@@ -20,6 +20,24 @@
 的内核能力、binder 三域由谁建节点、functionfs/zram/ext4 ACL/`&mmc0 okay`、`.ko` vermagic、
 manifest transport、探针覆盖面。
 
+## 1a2. mainline 专用 device.mk / BoardConfig.mk（本轮新增，含三处被证实的缺陷修复）
+
+`android9/mainline/` 现在是一份**可直接替换** AOSP `device/jiabo/z1/` 的 mainline 成品：
+`BoardConfig.mk`、`device.mk`、`rootdir/*`、`sepolicy/vendor/*`、`network/modules.json`、
+`patchset/{decisions.json,apply_to_los16.sh}`。相对 stock 分支那份修掉的真实缺陷：
+
+| 缺陷 | 后果 | 判定依据 |
+|---|---|---|
+| `ro.hardware.gralloc=z1` / `ro.hardware.hwcomposer=z1` 只写在 `ifeq stock` 里 | allocator@2.0-service 会去找 `gralloc.mt6572.so`（不存在）→ SF 拿不到 buffer，bootanimation 黑屏 | mainline 分支属性缺失 |
+| mainline 分支**不复制** `ueventd.z1.rc` | `/dev/dma_heap/*`、`/dev/net/tun`、`/dev/watchdog`、`/dev/input/*` 权限无人设置（stock 分支反而有这行） | rootdir 文件未被 COPY 引用 |
+| 撤掉 stock 的 configstore 假工厂后**没补** AOSP 默认实现 | manifest 声明 `configstore@1.1` 却无实例 → RenderEngine 查询失败，等于原地复现 S1G 的 SurfaceFlinger 段错 | manifest 声明 vs PRODUCT_PACKAGES |
+| 同上：`media.omx@1.0` 声明了没装 | 无 media.codec 服务 | 同上 |
+| `cas@1.0` 声明了但我们不提供实现 | 客户端 NOT_FOUND | 已从 manifest 移除 |
+
+这些由 `tools/z1/z1_a9_devlayer_check.py` 逐条对账（含**与原厂 scatter 核对分区/页大小**、
+`BOARD_KERNEL_CMDLINE` 必须留空因为 LK 不转发），当前 `DEVLAYER_FAIL=0`，并已并入
+`z1_a9_devcheck.sh` 第 7 道闸。
+
 ## 1b. 补丁判定表与施加器（`patchset/`）
 
 - `patchset/decisions.json`：stock 线 25 份补丁的逐份判定（revert=18 / keep=6 / rework=1），

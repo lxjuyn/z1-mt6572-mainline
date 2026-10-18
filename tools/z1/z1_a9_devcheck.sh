@@ -131,6 +131,13 @@ else
 	res FAIL "modules.json 装载清单" "$(grep -E 'MISSING|错误' /tmp/dc_mod.txt | head -2 | tr '\n' ' ')"
 fi
 
+echo "===== 7) device 层内部对账(manifest/包/属性/拷贝/scatter) ====="
+if timeout 200 python3 "$WT/tools/z1/z1_a9_devlayer_check.py" >/tmp/dc_layer.txt 2>&1; then
+	res OK "device 层自洽" "$(grep -o 'manifest 声明 [0-9]* 个 HAL[^;]*' /tmp/dc_layer.txt | head -1)"
+else
+	res FAIL "device 层对账" "$(grep '^  - ' /tmp/dc_layer.txt | head -4 | tr '\n' ';')"
+fi
+
 echo "===== 结论 ====="
 echo "DEVCHAIN_FAIL=$fail"
 [ "$fail" -eq 0 ]

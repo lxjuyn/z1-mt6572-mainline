@@ -13,7 +13,7 @@ import os, re, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WT = os.path.normpath(os.path.join(HERE, '..', '..'))
-SEP = os.path.join(WT, 'android9', 'mainline', 'sepolicy')
+SEP = os.path.join(WT, 'android9', 'mainline', 'sepolicy', 'vendor')
 CFG = os.path.join(WT, '.config')
 UEV = os.path.join(WT, 'android9', 'mainline', 'rootdir', 'ueventd.z1.rc')
 
