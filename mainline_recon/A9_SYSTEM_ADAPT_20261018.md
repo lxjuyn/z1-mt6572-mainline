@@ -129,3 +129,38 @@ python3 tools/z1/z1_a9_system_accept.py <system.img>          # 只读，不改�
 boot.img 用本机 P9 出片（`out/boot_mainline_a9p9_D1_1b.img` / `..._D4_4b.img`），
 刷完由 `[a9hand] RESULT_STEP_handoff_probe=GO` 决定是否进 A9；判定不过原样落回调试 shell。
 
+
+## 10. 交料通道：本机唯一被证能下大件的路（2026-10-18 实测）
+
+前面 §8 说"卡的是出网面"。本轮把可下与不可下都落到具体证据上：
+
+| 通路 | 实测 |
+|---|---|
+| `api.github.com` 的 release asset 接口 + `release-assets.githubusercontent.com` | **可下**：取本仓 `v13.5` 的 `mt6572-z1.dtb`，19,744 B，下回后 `file` 认出是 DTB、`dtc` 解得开 |
+| `download.lineageos.org/api/v2/devices/<codename>/builds` | **接口可通**，返回 JSON；ham/find7/kccat6/lentislte/r5/m0 全 `[]` |
+| `mirrorbits.lineageos.org/full/<device>/<date>/<file>.zip` | **真下载口**（302 到 mirrors.ustc.edu.cn 或 mirror.freedif.org）；但 `16.0/ham/...` 返**真 404** —— 官方已下架 A9 arm32 |
+| `mirrors.ustc.edu.cn/lineageos/` | 目录可达（根下只剩 `exp/ full/ su/ tools/`），`full/ham/` 404；文件级 GET 返 403 |
+| `androidfilehost.com`、`download.mokeedev.com`、`downloads.codefi.re` | 全部超时；`sourceforge.net` 403 |
+
+所以交 A9 system.img 的可行做法是**走 GitHub Release 资产**，配套 `tools/z1/z1_a9_ship.sh`：
+
+```sh
+# 持镜像那台机器：切片 + 逐片 sha256 + 整件 sha256，写进 SHIPPING.txt
+tools/z1/z1_a9_ship.sh split <system.img> <分片目录> [分片 MiB，默认 200]
+#   然后按项目既有纪律把 <分片目录>/*.a9part 与 SHIPPING.txt 传到 Release 资产
+# 本机：列 tag 下的 .a9part 资产并逐片拉回
+tools/z1/z1_a9_ship.sh pull  lxjuyn/z1-mt6572-mainline <tag> /tmp/a9ship
+tools/z1/z1_a9_ship.sh verify /tmp/a9ship out/system_a9.img      # 任一片坏 → rc=3，不出镜像
+python3 tools/z1/z1_a9_system_accept.py out/system_a9.img         # 内容级验收
+```
+
+实测（不是推演）：
+- 943,718,400 B 真镜像切 5 片、重装配后整件 sha256 与原文件逐字节相同；改坏其中 1 字节 →
+  `哈希不符 tt.bin.01.a9part` + `VERIFY=FAIL`，rc=3，不产出镜像。
+- 全链一次跑通（A9 arm32 夹具）：`split → verify(FORM=ext4) → z1_a9_system_accept=ACCEPT →
+  z1_a9_mainline_system(投 6 份 device 层) → z1_a9_flashpkg` 出的包放行 `bootimg, android`，
+  并带 `SYS_ACCEPT.json/log` 进指纹清单。**夹具不是交付物**，这条只证明通道与判据链能接上。
+- 两个实现期踩出来的错，都写进代码注释了：`sha256sum -c` 在 zh_CN locale 下打"…: 成功"而非
+  ": OK"，按 `: OK` 数通过数会把全过判成 0/N（现改为逐片自算哈希并核对片数）；
+  ext4 的 `s_magic` 在文件偏移 **1080**（超级块 1024 + 56），只看 1024 读到的是
+  `s_log_block_size`，会把真 ext4 报成 UNKNOWN。
