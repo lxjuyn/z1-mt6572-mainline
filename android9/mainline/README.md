@@ -86,6 +86,20 @@ tools/z1/z1_repack_a9_ramdisk.sh /tmp/rd_a9 out/ramdisk_v13_7_acm.gz out/ramdisk
 A9_RAMDISK=out/ramdisk_a9p4.gz tools/z1/z1_a9_p2.sh pack 1b out/boot_mainline_a9p4_android.img
 ```
 
+**交回后先做内容级验收再出片**（`z1_a9_p2.sh` 只保证封装/尺寸正确，判不出"这是不是 A9 的
+first-stage ramdisk"）：
+
+```sh
+python3 tools/z1/z1_a9_ramdisk_accept.py <交回的 ramdisk>
+```
+
+它判三层：封装(带 512B MTK 头且头长度与 body 自洽，或裸 gzip-cpio)、
+A9 first-stage 形状(`/init` 必须是 32-bit ARM 静态 ELF，且要有 `first_stage_*.rc`/`init.*.rc`、
+`sepolicy`、`fstab.*`、`ueventd.rc`)、语义红线(出现 `/z1_stock_kernel`、`ro.z1.stock_kernel`、
+rc 里的 `mount binderfs` 一律 REJECT —— 前两个是 stock 线代偿，第三个与本内核
+`ANDROID_BINDERFS=n` 冲突)。五组夹具实测：探针 ramdisk→REJECT(缺三项)、合成 A9 形状→ACCEPT、
+残留 stock 门控→REJECT 并点名文件、头长度谎报→L1-FAIL、裸 gzip→ACCEPT 但指引先重打封装。
+
 `pack` 会按**实际 body** 现算 initrd-end、回写 dts、重编 dtb、跑 6 MB 预算闸门、
 打包后再从镜像里反解内嵌 DTB 复核（`VERIFY=OK` 才算交付）。
 
