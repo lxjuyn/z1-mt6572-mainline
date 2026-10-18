@@ -8,7 +8,9 @@
 - `CONFIG_ANDROID_BINDER_IPC=y`，`CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"`，`CONFIG_ANDROID_BINDERFS=n`。
   ⇒ `/dev/binder`、`/dev/hwbinder`、`/dev/vndbinder` 由驱动静态注册，**AOSP 侧不需要 binderfs 挂载逻辑**，`init.rc` 里不要加 `mount binderfs`。这是相对 stock 线最大的解放：S1 系列为了绕开"没有 hwbinder"而做的 `ro.z1.stock_kernel` 门控、本地 passthrough 工厂、禁用 hwservicemanager 那一整套补丁，在这条线上**应当撤掉**，回到标准 HIDL 路径。
 - `CONFIG_ANDROID_ASHMEM=y`（从 `origin/wip/android9` 回移 985 行实现，`drivers/android/ashmem.c`，uapi `__ASHMEMIOC=0x77`，`SET_PROT_MASK` 按值传参）。
-- **没有 `/dev/ion`**：主线已删除 ION。本内核提供 `CONFIG_DMABUF_HEAPS=y` + `_SYSTEM` + `_CMA`，即 `/dev/dma_heap/system` 与 `/dev/dma_heap/system-uncached`/`linux,cma` 形态的 heap 字符设备，`DMA_HEAP_IOCTL_ALLOC = _IOWR('H', 0, struct dma_heap_allocation_data)`。
+- **没有 `/dev/ion`**：主线已删除 ION。本内核提供 `CONFIG_DMABUF_HEAPS=y` + `_SYSTEM` + `_CMA`，即 `/dev/dma_heap/system` 与 CMA 堆(`/dev/dma_heap/linux,cma`) 两类 heap 字符设备。
+  **本树不存在 `system-uncached`**（`drivers/dma-buf/heaps/system_heap.c` 只注册 `exp_info.name = "system"`，
+  全树 grep `system-uncached` 0 命中）——userspace 不要去 open 它，会 ENOENT，`DMA_HEAP_IOCTL_ALLOC = _IOWR('H', 0, struct dma_heap_allocation_data)`。
   DTS 里 CMA 池为 `default-pool`（96 MiB，`linux,cma-default`），是 `system-cma` 类分配的后端。
 - 显示：本轮镜像走 LK 遗留的 `chosen/framebuffer0`（simple-framebuffer，240x320 r5g6b5），`&dsi` 与 panel 仍 disabled；`CONFIG_DRM_LIMA=y` 已编入但**本轮未上板复验**，不作为 A9 显示前置。
 - `CONFIG_SYNC_FILE=y`、`CONFIG_DMA_SHARED_BUFFER=y`：Pie 的 `hardware/libhardware/include/hardware/sync.h` 走 `sync_file` 时用 `SYNC_IOC_WAIT`/poll，这条在本内核可用；旧的 `/dev/sw_sync` 主线已无（探针会报 `sw_sync_dev=FAIL`）。

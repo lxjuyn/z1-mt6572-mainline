@@ -37,6 +37,9 @@
 # 调试用 USB 串口(klog 转发口, 0e8d:2006 configfs ACM)，与 ADB 无关，A9 正式跑可留
 /dev/ttyGS0		0600	root	root
 
+# mainline 把这颗 UART 注册为 ttyS0(原厂 3.4.67 是 ttyMT0)；dts bootargs 的末位 console= 就是它
+/dev/ttyS0		0600	root	root
+
 # ADB 走 FunctionFS: init.z1.rc 已 mkdir /dev/usb-ffs/adb 0770 shell shell 并 mount functionfs
 /dev/usb-ffs/adb	0770	shell	shell
 /dev/usb-ffs/adb/*	0660	shell	shell

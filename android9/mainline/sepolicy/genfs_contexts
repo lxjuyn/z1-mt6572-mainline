@@ -1,0 +1,12 @@
+# 只列"文件系统"级标签。设备节点标签在 device_file_contexts，别混进这里
+# （genfscon 对 devtmpfs 上的节点不生效，写错会静默不生效，很难查）。
+# 每个 fsname 由 tools/z1/z1_a9_sepolicy_check.py 对着 a9_wt/.config 核是否真的支持。
+genfscon securityfs	/			u:object_r:securityfs:s0
+genfscon pstore		/			u:object_r:pstorefs:s0
+genfscon functionfs	/			u:object_r:functionfs:s0
+genfscon configfs	/			u:object_r:configfs:s0
+genfscon fusectl		/			u:object_r:fusectlfs:s0
+genfscon devpts		/			u:object_r:devpts:s0
+genfscon cgroup		/cpuset			u:object_r:cgroup:s0
+genfscon cgroup		/memory			u:object_r:cgroup:s0
+genfscon tmpfs		/dev			u:object_r:tmpfs:s0

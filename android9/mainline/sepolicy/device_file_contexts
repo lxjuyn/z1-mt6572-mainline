@@ -1,0 +1,22 @@
+# /dev 下的设备节点标签（对应 ueventd.z1.rc 的权限行；两份必须一起看，
+# 权限给了但没标签，enforcing 阶段照样打不开）。
+/dev/binder			u:object_r:binder_device:s0
+/dev/hwbinder			u:object_r:binder_device:s0
+/dev/vndbinder			u:object_r:binder_device:s0
+/dev/ashmem			u:object_r:ashmem_device:s0
+/dev/fb0			u:object_r:gpu_device:s0
+/dev/graphics/fb0		u:object_r:gpu_device:s0
+/dev/input			u:object_r:input_device:s0
+/dev/net/tun			u:object_r:tun_device:s0
+/dev/watchdog			u:object_r:watchdog_device:s0
+/dev/ttyGS0			u:object_r:serial_device:s0
+/dev/ttyS0			u:object_r:console_device:s0
+# mainline 没有 /dev/ion，dma-heap 是缓冲区来源。Pie 的策略里没有 dmabuf_heap_device 这个类型，
+# 所以这里先落到 device，enforcing 收紧时需要在本仓自定义类型（检查器会把它列为 TODO）。
+/dev/dma_heap/system		u:object_r:device:s0
+/dev/dma_heap/linux,cma		u:object_r:device:s0
+
+# ADB 的 FunctionFS 端点(init.z1.rc 里 mkdir+mount functionfs 的那两个目录)
+/dev/usb-ffs/adb(/.*)?			u:object_r:adb_device:s0
+# auxadc/IIO 读数(battery 取证路线)。health HAL 首轮若只读 power_supply sysfs 则用不到
+/dev/iio:device0			u:object_r:device:s0

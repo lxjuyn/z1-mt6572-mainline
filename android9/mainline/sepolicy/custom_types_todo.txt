@@ -1,0 +1,7 @@
+# enforcing 阶段之前必须落实的自定义/待定项
+1. /dev/dma_heap/* 目前落到 u:object_r:device，Pie 自带策略没有 dmabuf_heap_device 类型；
+   收紧时需要在本仓 sepolicy 里自定义 type + allow 规则（首轮 permissive 不阻塞）。
+2. genfscon cgroup 只写了 cpuset/memory 两个子路径：A9 libprocessgroup 还会建 cpu/cpuacct/freezer/devices，
+   收紧阶段要按板上 avc denial 实际出现的挂载点补齐，不要凭空加。
+3. watchdog_device / tun_device / serial_device 在 Pie 公共策略里存在，若构建机 vendor 策略
+   未 include 公共 te，需在其 file_contexts 里保留同名类型。

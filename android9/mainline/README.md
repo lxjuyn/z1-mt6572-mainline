@@ -20,6 +20,40 @@
 的内核能力、binder 三域由谁建节点、functionfs/zram/ext4 ACL/`&mmc0 okay`、`.ko` vermagic、
 manifest transport、探针覆盖面。
 
+## 1b. 补丁判定表与施加器（`patchset/`）
+
+- `patchset/decisions.json`：stock 线 25 份补丁的逐份判定（revert=18 / keep=6 / rework=1），
+  每条带 `why`(它做什么) 与 `kernel_fact`(mainline 上为什么成立/不成立) 以及
+  `base_sha256`/`result_sha256`（取自 stock 分支 `android9/stock_patches/manifest.json`）。
+  由 `tools/z1/z1_a9_patchdecisions.py` 生成，**双向完整性校验**：有补丁没判定、判定指向
+  不存在的补丁、有 .patch 却不在 manifest.json 里，三种情况都会报出来
+  （当前 `PATCH_DECISION_FAIL=0`，25/25 覆盖）。
+- `patchset/apply_to_los16.sh`：在源树上按判定表对齐状态。靠 sha256 判三态
+  （UNPATCHED / PATCHED / UNKNOWN），未知态**绝不猜测**，直接计入失败。默认 dry-run，`--apply` 才动手。
+  已用夹具做过单元验证：revert 的已施加文件→`REVERTED` 且复核 sha==base；
+  keep 的未施加文件→`APPLIED` 且复核 sha==result；被其它改动碰过的文件→`UNKNOWN`+退出码 1。
+  注意补丁头是 `a/<相对路径>` 形态，`patch -p1` 剥一层，这与 AOSP 的 git diff 习惯一致。
+
+## 1c. sepolicy 交付物（`sepolicy/`）
+
+`genfs_contexts`（只列文件系统级标签）、`device_file_contexts`（/dev 节点标签，与 ueventd 的
+权限行一一对应）、`file_contexts`（vendor 二进制）、`required_types.txt`（引用到的全部 type）、
+`custom_types_todo.txt`（enforcing 前要落实的三项，含"dma-heap 在 Pie 里没有现成类型，首轮落 device"）。
+
+由 `tools/z1/z1_a9_sepolicy_check.py` 静态核（本机没有 checkpolicy，所以只核**能核的**）：
+每条 genfscon 的 fsname 是否有内核支撑、每个 /dev 标签是否有内核支撑、
+ueventd 与 sepolicy 是否互相覆盖（权限给了没标签 / 有标签没权限）、引用的 type 是否都登记。
+本轮它抓到两处真错：一是我把设备节点写进了 `genfscon tmpfs`（对 devtmpfs 节点不生效，静默失效），
+二是 `/dev/dma_heap/system-uncached` —— **本树根本没有这个 heap**
+（`system_heap.c` 只注册 `exp_info.name = "system"`，全树 grep 0 命中），已从 ueventd/sepolicy
+删除，并纠正了 `A9_DMA_HEAP_CONTRACT.md` 里那句会让构建机去 open 不存在节点的描述。
+
+一条命令跑全部闸门：
+
+```sh
+tools/z1/z1_a9_devcheck.sh      # DEVCHAIN_FAIL=0 才算可交付
+```
+
 ## 2. 那台机器上要做的四件事
 
 1. **撤掉 stock 3.4.67 的代偿补丁**（判定清单在 `A9_SYSTEM_MIGRATION_CHECKLIST.md` §1，15 份），
@@ -74,3 +108,6 @@ P4 实测：zImage 4,612,608 + dtb 19,796/19,808 + 探针 ramdisk 1,276,824 → 
 - 触摸节点 `&i2c1/touchscreen@5d` 仍是 `status="disabled"`，等板上 `i2cprobe` 取证
   （见 `TOUCH_CST836U_20260829.md`）；A9 首轮输入面靠 `KEYBOARD_MTK_PMIC`（已 =y）。
 - WiFi(mt6620) 与 S6 的 LCM/FTS 路线另评，不在本轮。
+
+> 目录名是 `patchset/` 而不是 `patches/`：内核 `.gitignore` 第 132 行有个裸 `patches` 规则，
+> 会把任何叫这个名字的目录静默忽略掉（本轮实际踩到，`git add` 后 status 里看不见）。

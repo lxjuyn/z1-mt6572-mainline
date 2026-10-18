@@ -1,0 +1,3 @@
+# vendor 侧二进制标签。本仓已有的 z1 自建服务只有 health 一个，其余沿用 AOSP 默认实现。
+/(vendor|system/vendor)/bin/hw/android\.hardware\.health@2\.0-service\.z1    u:object_r:hal_health_default_exec:s0
+/(vendor|system/vendor)/bin/z1_usb_setup\.sh                                u:object_r:vendor_file:s0

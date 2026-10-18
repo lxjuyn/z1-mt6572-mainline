@@ -112,6 +112,18 @@ else
 	res FAIL "manifest.xml" '$DEV/rootdir 下没有 —— 需从 stock 分支 rootdir/ 取 mainline 版'
 fi
 
+echo "===== 5) 补丁判定与 sepolicy 一致性(把三道闸收进一条命令) ====="
+if python3 "$WT/tools/z1/z1_a9_patchdecisions.py" >/tmp/dc_patch.txt 2>&1; then
+	res OK "补丁判定完整" "$(grep -o '补丁总数=[^ ]*  已判定=[^ ]*[^)]*' /tmp/dc_patch.txt | head -1)"
+else
+	res FAIL "补丁判定" "$(tail -3 /tmp/dc_patch.txt | tr '\n' ' ')"
+fi
+if python3 "$WT/tools/z1/z1_a9_sepolicy_check.py" >/tmp/dc_sep.txt 2>&1; then
+	res OK "sepolicy 与 ueventd/内核一致" "SEP_POLICY_FAIL=0"
+else
+	res FAIL "sepolicy 一致性" "$(grep '^FAIL' /tmp/dc_sep.txt | head -3 | tr '\n' ' ')"
+fi
+
 echo "===== 结论 ====="
 echo "DEVCHAIN_FAIL=$fail"
 [ "$fail" -eq 0 ]
