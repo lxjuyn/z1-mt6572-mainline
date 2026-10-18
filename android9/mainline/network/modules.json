@@ -1,0 +1,25 @@
+{
+  "generated_by": "tools/z1/z1_a9_stage_modules.py",
+  "kernelrelease": "7.0.0-rc7-z1+",
+  "source_manifest": "origin/wip/android9-stock-s1:android9/device/jiabo/z1/network/modules.json",
+  "modules": [
+    {
+      "name": "xt_IDLETIMER",
+      "file": "xt_IDLETIMER.ko",
+      "source": "net/netfilter/xt_IDLETIMER.ko",
+      "depends": [],
+      "sha256": "8b28e4294e437345fd039fe7a83f9453c727fede35ae0fae5e4dab4b42a65d48",
+      "sha256_changed_from_stock": true,
+      "depends_note": "这些依赖已内建，无需装载: x_tables"
+    },
+    {
+      "name": "xt_quota2",
+      "file": "xt_quota2.ko",
+      "source": "net/netfilter/xt_quota2.ko",
+      "depends": [],
+      "sha256": "2b672069c5d0e5132c26a84c7b620946f54db1ebb87b983a2d43b7d71a48464e",
+      "sha256_changed_from_stock": true,
+      "depends_note": "这些依赖已内建，无需装载: x_tables"
+    }
+  ]
+}

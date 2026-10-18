@@ -1,0 +1,17 @@
+# A9 P8 构建台账 2026-10-18 (补 netd 缺的 7 个 netfilter 项 + 重算 .ko 装载清单)
+
+branch=wip/a9-mainline HEAD=2e649a1a330aa99c4f36dbfc04a6b84e9a7973ba kernelrelease=7.0.0-rc7-z1+
+
+  4350464 c0084f1e3251ef15ae1caeb0f006f801f8c6f9daf506b8c7301c1ad15fb1a9f7  a9_wt/arch/arm/boot/zImage
+  5652480 0a6d22c0894855dda5654529a5a520e7a28565e580a09e92f74b49dc55ce8303  out/boot_mainline_a9p8_D1_1b.img
+  5652480 b42c0ee40db534bca74459330dbe500f9ad0c9803cb18948ef3f4f6ddea93df2  out/boot_mainline_a9p8_D4_4b.img
+    10572 2b672069c5d0e5132c26a84c7b620946f54db1ebb87b983a2d43b7d71a48464e  a9_wt/net/netfilter/xt_quota2.ko
+    14808 8b28e4294e437345fd039fe7a83f9453c727fede35ae0fae5e4dab4b42a65d48  a9_wt/net/netfilter/xt_IDLETIMER.ko
+
+新开: NETFILTER_XT_TARGET_CT / XT_MATCH_POLICY / XT_MATCH_U32 / XT_MATCH_STATE /
+  NF_CONNTRACK_FTP / NF_NAT_FTP / IP6_NF_MATCH_RPFILTER —— P3 只开了一半。
+zImage 4,346,368 -> 4,350,464 (+4 KB)；镜像 5,652,480；余量 638,976 B；
+A9 ramdisk 上限 1,917,100 B。两件 RESULT: VALID + VERIFY=OK + PAYLOAD-OK；DEVCHAIN_FAIL=0。
+
+modules.json 由 z1_a9_stage_modules.py 从本轮产物重算: stock 41 条 -> 2 条真模块 + 39 条已内建，
+MODULES_JSON_MISSING=0(此前 7 条既无 .ko 也非内建，构建机装载会找不到文件)。

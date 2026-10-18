@@ -124,6 +124,13 @@ else
 	res FAIL "sepolicy 一致性" "$(grep '^FAIL' /tmp/dc_sep.txt | head -3 | tr '\n' ' ')"
 fi
 
+echo "===== 6) .ko 装载清单与本轮构建是否一致 ====="
+if timeout 300 python3 "$WT/tools/z1/z1_a9_stage_modules.py" >/tmp/dc_mod.txt 2>&1; then
+	res OK "modules.json 与本轮产物一致" "$(grep -o 'MODULES_JSON_MISSING=[0-9]*' /tmp/dc_mod.txt)"
+else
+	res FAIL "modules.json 装载清单" "$(grep -E 'MISSING|错误' /tmp/dc_mod.txt | head -2 | tr '\n' ' ')"
+fi
+
 echo "===== 结论 ====="
 echo "DEVCHAIN_FAIL=$fail"
 [ "$fail" -eq 0 ]
