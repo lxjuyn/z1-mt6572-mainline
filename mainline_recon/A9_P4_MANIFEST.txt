@@ -1,0 +1,19 @@
+# A9 P4 构建台账 2026-10-18 (RT_GROUP_SCHED + 新 /init 自证段 + 打包闸门加固)
+branch=wip/a9-mainline P3_HEAD=40df3cb993d054e4350d6bb56648d13fdad3c784 kernelrelease=7.0.0-rc7-z1+
+ramdisk=ramdisk_a9p4.gz body=1276312 -> linux,initrd-end=0x84237998 (由脚本按实际 body 现算并回写 dts)
+
+  4612608 405a8fe30ebaddd47876e56447e6ab75cf3b249940ba1af6dd55e122c354f2c5  zImage
+    19808 a2a9588d19fabc2f5c92686c9cfc6fcd16b2b2fe88c6a2369b5dd8bba2b09def  dtb(树内=4b)
+  1276824 d90eda7639fa2e525bbceb3406907427514c82ae2aec3ae39a40a0a37f34ef7e  ramdisk_a9p4.gz
+  5914624 88fc207c871cf56c8b3c0af023bd382875dab9dc6e1dec5423996f673bceeacd  out/boot_mainline_a9p4_D1_1b.img
+  5914624 688c50c16815af83c86df95ae0b889e3c7313ad6052f81dd375aabe2218fced7  out/boot_mainline_a9p4_D4_4b.img
+    10572 8e2b7680a64a7329c8fe387f426bab10a71789c636ed252c8292343af2e56a51  xt_quota2.ko
+    14808 22a487b05c0d5fe2d2d9eadfe177c2dce482e04dbac86781e32ef933948bd5d7  xt_IDLETIMER.ko
+   174109 9be024a2ca72d827b4220ab7c95de69382907424f5844a0747a714848a5a3a8e  .config
+     8074 335fec72c01adba0ec31fe5b5c938e50b3c433a6a6566a136b202e47faead48a  validate_mtk_boot.py
+
+P3->P4: zImage 4608512 -> 4612608 (+4096 B, RT_GROUP_SCHED); 镜像 5910528 -> 5914624; 余量 376832 B; A9 ramdisk 上限约 1654944 B
+两张均 validate --require-ramdisk --require-init-root -> RESULT: VALID；
+VERIFY=OK(内嵌 DTB bus-width/initrd-end/androidboot)；PAYLOAD-OK(zImage 与 ramdisk 在镜像内逐字节完整)。
+z1_a9_devcheck.sh -> DEVCHAIN_FAIL=0。归档 bridge_backups/products/a9p4_20261018_100806/
+

@@ -192,6 +192,13 @@ case "$cmd" in
 	touch "$DTS"
 	make ARCH=arm CROSS_COMPILE=$CC dtbs >/dev/null 2>&1 || die "dtbs 编译失败"
 	budget
+	# 前置预算闸门：必须在打包**之前**判死。实测发现 mkbootimg 在 kernel+dtb+ramdisk
+	# 超过 6MB 分区时不会报错，而是静默丢掉整个 ramdisk（镜像照样 ≤6MB、照样能解出
+	# kernel/dtb），上板表现是 VFS panic，极易被误诊成内核回归。
+	local proj
+	proj=$(( $(stat -c%s "$ZIMG") + $(stat -c%s "$DTB") + $(stat -c%s "$RD") + 4096 ))
+	echo "投影大小(内核+dtb+ramdisk+头) = $proj B / 上限 $BOOT_LIMIT B -> 超出 $(( proj - BOOT_LIMIT )) B"
+	[ "$proj" -le "$BOOT_LIMIT" ] || { echo ">>> 超预算，拒绝打包（先按 A9_BOOT_BUDGET.md §3 腾空间，不要指望截断）"; exit 6; }
 	rm -f "$out"
 	Z1_ZIMAGE="$ZIMG" Z1_DTB="$DTB" Z1_RAMDISK="$RD" Z1_OUT="$out" \
 		Z1_CMDLINE='console=tty0 console=ttyS0,921600n8 root=/dev/ram panic=10 loglevel=7 clk_ignore_unused regulator_ignore_unused oops=panic sysrq_always_enabled rdinit=/init earlycon=mtk8250,0x11005000 androidboot.hardware=z1 androidboot.selinux=permissive' \
@@ -201,6 +208,18 @@ case "$cmd" in
 	[ "$sz" -le "$BOOT_LIMIT" ] || die "镜像 $sz B 超过 boot 分区上限 $BOOT_LIMIT"
 	python3 "$VAL" "$out" --dtb "$DTB" --require-init-root 2>&1 | tail -6
 	verify_embedded "$out" "$v" "$CUR_END" || die "内嵌 DTB 复核未通过，镜像不可交付"
+	python3 - "$out" "$ZIMG" "$RD" <<'PY' || die "载荷逐字节存在性核验未通过"
+import sys
+img,kz,rd=sys.argv[1:4]
+d=open(img,'rb').read()
+for name,src in (('zImage',kz),('ramdisk',rd)):
+    b=open(src,'rb').read()
+    probe=b[:65536] if len(b)>=65536 else b
+    off=d.find(probe)
+    if off<0: print(f'PAYLOAD-FAIL {name}: 镜像里找不到它的前 {len(probe)} B'); sys.exit(1)
+    if d[off:off+len(b)]!=b: print(f'PAYLOAD-FAIL {name}: 在 {off} 处找到但内容不一致(疑似截断)'); sys.exit(1)
+    print(f'PAYLOAD-OK {name}: 在 {off} 处逐字节完整({len(b)} B)')
+PY
 	echo "OUT=$out SIZE=$sz HEADROOM=$(( BOOT_LIMIT - sz )) SHA256=$(sha256sum "$out" | cut -d' ' -f1)"
 	;;
   budget) budget ;;
