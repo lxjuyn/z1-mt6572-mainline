@@ -228,7 +228,8 @@ go() {
   if [ -e "$SELINUXFS/load" ]; then
     POL=""
     for c in "$VENDROOT/etc/selinux/precompiled_sepolicy" /odm/etc/selinux/precompiled_sepolicy \
-             /product/etc/selinux/precompiled_sepolicy $SYSROOT/vendor/etc/selinux/precompiled_sepolicy \
+             /product/etc/selinux/precompiled_sepolicy $SYSROOT/etc/selinux/precompiled_sepolicy \
+             $SYSROOT/vendor/etc/selinux/precompiled_sepolicy \
              $SYSROOT/system/vendor/etc/selinux/precompiled_sepolicy; do
       [ -f "$c" ] && { POL=$c; break; }
     done

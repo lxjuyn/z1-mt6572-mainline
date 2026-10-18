@@ -5,7 +5,10 @@ branch=wip/a9-mainline HEAD=66b120a89bc1595cc875631e1d6580e8adee7757 kernelrelea
 system 原料 = phhusson GSI v123 (AOSP 9.0/API28/armeabi-v7a, A-only)，裁剪+resize 到 929,792,000 B
 PID1 来源   = lxjuyn/z1-android9 release Linux7-20261006-r2 的 boot.img ramdisk 里的 init(1,637,512 B, EM_ARM 静态)；
               ueventd 用同一 ELF 的副本（上游是 symlink 到 init）；不入库，只在本地当输入件。
-boot        = out/boot_mainline_a9p9_D1_1b.img d7b428c1…（P9 交棒链，eMMC 1-bit 安全基线）
+boot        = out/boot_mainline_a9p9b_D1_1b.img 962e131d0c6ea84303c56006c3dd249d59ad9c39708ba9853e55f46e32986ea0
+              （5,658,624 B；boot 余量 632,832 B；eMMC 仍 1-bit 安全基线；取代 a9p9_D1 那份 d7b428c1…，
+               因为交棒脚本改了策略搜索路径 -> ramdisk 变 -> initrd-end 变，包必须与源码同源自洽）
+              ramdisk_a9p9.gz body=1,282,077 -> linux,initrd-end=0x8423901d
        5656576 d7b428c1fccdd9c09d8b416503524b9372ef396e8fa02ec9929374d90c04625a  out/A9_flashpkg_p11_android/boot.img
      929792000 ecbee094c1323d8fcfad41140588e9fadaa1678aef70eaeb2eb277e9340737b5  out/A9_flashpkg_p11_android/system.img
      929792000 ecbee094c1323d8fcfad41140588e9fadaa1678aef70eaeb2eb277e9340737b5  out/a9sys_p11/system_mainline.img
@@ -15,3 +18,10 @@ boot        = out/boot_mainline_a9p9_D1_1b.img d7b428c1…（P9 交棒链，eMMC
 装包：z1_a9_flashpkg.sh rc=0，scatter 只放行 bootimg,android；9 个分区强制不下载；回滚件 1/boot.img 在位
 回归：SPARSE_SELFTEST=ALL_PASS 5/5；SYS_ACCEPT 自测 4/4；HANDOFF_SELFTEST=ALL_PASS 8/8
 未做：上板。SELinux 载入、/vendor(symlink) 处理、HIDL manifest 落位三条仍待串口证据。
+
+自洽复核（不信 pack 自己的话）：包内 boot.img/system.img 与源件 sha 逐字相同；
+ramdisk 在包内 boot.img 里逐字节在位；从 dtb 反解 initrd-end=0x8423901d、bus-width=01。
+
+一处要说清的错：上一条提交(66b120a89..0eef02ed5) 的信息里写了"交棒的策略搜索路径已补
+$SYSROOT/etc/selinux/precompiled_sepolicy"，其实那两次 replace 都因转义没落上（我当时没断言），
+话说过头了。本条是真的补上了并跑过 HANDOFF_SELFTEST=ALL_PASS 8/8。
