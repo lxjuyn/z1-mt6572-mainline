@@ -322,6 +322,19 @@ static void probe_binder(const char *name, const char *path, int want_version)
 		if (rc == 0) {
 			ps("=PASS protocol_version=");
 			pd(bv.protocol_version);
+			/* A9 的 ProcessState::open_driver 会用 BINDER_VERSION 与它编译期的
+			 * BINDER_CURRENT_PROTOCOL_VERSION 比对，不等就 close(fd) 并把 fd 置 -1，
+			 * servicemanager 随之起不来 —— 现场长得像"内核 binder 坏了"。
+			 * Pie 的 bionic uapi 头与本树 uapi 是同一个条件式
+			 * (#ifdef BINDER_IPC_32BIT -> 7，否则 -> 8)，而本树没有任何地方定义
+			 * BINDER_IPC_32BIT（binder.i 里是 __pu_val = ((8))，反汇编 mov r0,#8），
+			 * 所以板上必须读到 8；不是 8 就当场判失败，别等下一轮刷机才反应过来。 */
+			if (bv.protocol_version != 8) {
+				putch('\n');
+				ps("RESULT_STEP_binder_proto_expected_8=FAIL(got=");
+				pd(bv.protocol_version);
+				ps(")");
+			}
 		} else {
 			ps("=PASS(open) ioctl=");
 			pd(rc);

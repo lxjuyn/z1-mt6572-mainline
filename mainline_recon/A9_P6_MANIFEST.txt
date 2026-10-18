@@ -1,0 +1,21 @@
+# A9 P6 构建台账 2026-10-18 (探针 binder 协议版本硬判据 + 可复现构建脚本)
+
+branch=wip/a9-mainline P5_HEAD=f8db719627a63569daa00d9ab8fc690373a1f3eb kernelrelease=7.0.0-rc7-z1+
+内核与 P4 同一 zImage(未改 config)，本轮只换 ramdisk 里的探针。
+ramdisk_a9p6.gz body=1276124 -> linux,initrd-end=0x842378dc (512B 头 0x04 字段已互证)
+
+  4612608 405a8fe30ebaddd47876e56447e6ab75cf3b249940ba1af6dd55e122c354f2c5  arch/arm/boot/zImage
+  1276636 b1ed2bb5f03460f94f03204c12de0aa696b0afb8d710a91b57b6fdd41e402f24  out/ramdisk_a9p6.gz
+  5914624 0b235ed3b832c0f06f77ba8ba1b29262c395e16a1283888765ddb9ad58302d05  out/boot_mainline_a9p6_D1_1b.img
+  5914624 098076bafc07e2076f6cf28584c08af46516bbd671b98edd806fd658ad30f2ea  out/boot_mainline_a9p6_D4_4b.img
+    10600 c5439866e1f653417fb74c8876a360233b249535ee27cab4cb304f2e6bdd80bf  tools/z1/z1_a9_probe
+    10572 8e2b7680a64a7329c8fe387f426bab10a71789c636ed252c8292343af2e56a51  xt_quota2.ko
+    14808 22a487b05c0d5fe2d2d9eadfe177c2dce482e04dbac86781e32ef933948bd5d7  xt_IDLETIMER.ko
+
+两件均 `--require-ramdisk --require-init-root` -> RESULT: VALID；
+VERIFY=OK(内嵌 DTB bus-width/initrd-end/androidboot)；PAYLOAD-OK(zImage 与 ramdisk 逐字节完整)；
+z1_a9_devcheck.sh -> DEVCHAIN_FAIL=0。
+
+binder 协议版本查实见 mainline_recon/A9_BINDER_PROTOCOL_VERSION.md：本树 binder.i 展开为
+__pu_val = ((8))、objdump mov r0,#8；Pie bionic uapi 头是同一条件式(#ifdef BINDER_IPC_32BIT->7 else 8)，
+两侧都是 8，已把"读到 !=8 即 FAIL"写进探针。
