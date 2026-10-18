@@ -126,6 +126,21 @@ probe() {
     umount "$SYSROOT" 2>/dev/null; return 1
   fi
   say "A9_INIT_BIN=$BIN (ELF EM_ARM 已验)"
+  # 这一行决定板上第一眼的解释：r2 那份 init 是带 [Z1STOCK-DIAG] 的 stock 线定制件，
+  # 它的代偿分支按 /z1_stock_kernel 标记门控（我们这边标记已删），但它还会多打一串
+  # [Z1STOCK-DIAG] 诊断行；认出来就别把它们当 AOSP 原生日志读。
+  if $BB grep -qa 'Z1STOCK-DIAG' "$BIN" 2>/dev/null; then
+    say "RESULT_STEP_init_flavor=Z1STOCK-DIAG(stock 线定制件；其代偿分支由 /z1_stock_kernel 门控，本镜像已无该标记)"
+  else
+    say "RESULT_STEP_init_flavor=AOSP-pine"
+  fi
+  # 顺带把它的阶段入口也认出来：这份里没有 selinux_setup 字串，说明 first stage 是直接
+  # reexec 到 second_stage 的 —— 交棒用 second_stage 是对的，别改成 selinux_setup。
+  if $BB grep -qa 'selinux_setup' "$BIN" 2>/dev/null; then
+    say "init 里有 selinux_setup 入口(标准 A9 三段式)"
+  else
+    say "init 里没有 selinux_setup 字串(reexec 直接到 second_stage)"
+  fi
   say "RESULT_STEP_handoff_probe=GO"
   return 0
 }

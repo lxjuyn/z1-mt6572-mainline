@@ -39,3 +39,21 @@ $SYSROOT/etc/selinux/precompiled_sepolicy"，其实那两次 replace 都因转�
              8 项 A9 支柱可执行齐备、device 层 8 处落点读回一致）
   SYS_ACCEPT=ACCEPT CHECKS=18 FAIL=0 WARN=2（target 机型名、sepolicy 只有 cil）
   scatter: 仅 bootimg 与 android 为 true，其余 17 个分区全 false（含 preloader/uboot/usrdata）
+
+又改了交棒（加 init 血统识别），按纪律整条链重打保持一致：
+  ramdisk body 1,282,077 -> 1,282,466，initrd-end 0x8423901d -> 0x842391a2，
+  boot 换 out/boot_mainline_a9p9c_D1_1b.img 75f15ce416fa9d06cebeeacd73acdd15adcbda28499cca66e3e9cbe0f8c96006（5,658,624 B，余量 632,832 B）；
+  包 out/A9_flashpkg_p11_android 重装并独立复核：包内 boot/system 与源件 sha 逐字相同、
+  ramdisk 在 boot.img 内逐字节在位、SYS_ACCEPT=ACCEPT、scatter 仅 bootimg+android。
+
+从真件二进制读出来的两条硬事实（不再靠记忆猜）：
+1) r2 那份 init 带 [Z1STOCK-DIAG] 串与 /z1_stock_kernel 标记门 —— 是 stock 线定制的 LOS16 init，
+   不是纯净 AOSP；因为我们投件的镜像里没有该标记，那些代偿分支不该激活，
+   交棒因此多打一行 `RESULT_STEP_init_flavor=Z1STOCK-DIAG|AOSP-pine`，板上第一行就能分辨。
+2) 它**不含 `selinux_setup` 字串**（first stage 直接 reexec 到 second_stage），
+   所以交棒用 `exec "$INIT" second_stage` 是对的；若换成 selinux_setup 反而会走空。
+   附带它在找的 SELinux 输入：/vendor/etc/selinux/precompiled_sepolicy、
+   /system/etc/selinux/plat_and_mapping_sepolicy.cil.sha256、/system/etc/selinux/mapping/、
+   /vendor/etc/selinux/plat_sepolicy_vers.txt、/sepolicy(ramdisk) —— 这几条就是板上 NOPOLICY
+   能不能翻正的答案所在，r2 的 system 到货后按这些路径逐项核。
+回归仍是 SPARSE 5/5、SYS_ACCEPT 5/5、HANDOFF 8/8 全绿。
