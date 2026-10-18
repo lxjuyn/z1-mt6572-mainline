@@ -81,16 +81,40 @@ mkdir -p "$W/sys_ue/${DISK}p2"; printf 'PARTNAME=android\n' > "$W/sys_ue/${DISK}
 out=$(run_probe "$W/sys_ue" "$W/sys_a9_arm"); rc=$?; echo "$out" | grep -E 'RESULT_STEP|节点' | sed 's/^/  /'
 [ $rc -eq 0 ] && expect PASS 6 "$rc" "$out" || { echo "  CASE=6 ***FAIL***"; fail=$((fail+1)); }
 
-echo "===== 7) go 的接线：by-name 符号链接 + 一路打到 exec ====="
-mkdir -p "$W/dev" "$W/by-name"
+echo "===== 7) go 的接线：by-name + 可写 /vendor 里放 fstab + SELinux 载入 + 一路到 exec ====="
+mkdir -p "$W/dev" "$W/by-name" "$W/vendor_fake/etc/selinux" "$W/selinux_fake" \
+         "$W/sys_a9_arm/etc" "$W/sys_a9_arm/vendor/etc"
+echo 'on post-fs-data' > "$W/sys_a9_arm/etc/fstab.z1"
+echo '占位' > "$W/sys_a9_arm/vendor/etc/keep"
+printf 'SEPOLICY-FAKE-BYTES-394417' > "$W/vendor_fake/etc/selinux/precompiled_sepolicy"
+: > "$W/selinux_fake/load"; : > "$W/selinux_fake/enforce"
 out=$(BB=$BB Z1_SYSBLOCK="$W/sys" Z1_SYSROOT="$W/sys_a9_arm" Z1_DISK="$DISK" Z1_NODEPREFIX="$W/dev" \
-       Z1_BYNAME_DIR="$W/by-name" Z1_HANDOFF_CONSOLE=/dev/stdout $BB sh -c "$BB sh $H go" 2>&1); rc=$?
-echo "$out" | grep -E 'by-name|RESULT_STEP' | sed 's/^/  /'
-echo "  (go 的 exec 目标在 x86 主机上必不可执行，rc=$rc 属预期；这里只断言判据链打通)"
-echo "$out" | grep -q 'RESULT_STEP_handoff=EXEC' && [ -L "$W/by-name/system" ] \
-  && echo "  CASE=7 PASS(到 exec 且 by-name/system 已建)" \
-  || { echo "  CASE=7 ***FAIL***"; echo "$out" | sed 's/^/      /'; fail=$((fail=fail+1)); }
-ls -l "$W/by-name" | sed 's/^/    /'
+       Z1_BYNAME_DIR="$W/by-name" Z1_VENDROOT="$W/vendor_fake" Z1_SELINUXFS="$W/selinux_fake" \
+       Z1_HANDOFF_CONSOLE=/dev/stdout $BB sh -c "$BB sh $H go" 2>&1); rc=$?
+echo "$out" | grep -E 'by-name|RESULT_STEP|ro.boot.hardware' | sed 's/^/  /'
+echo "  (exec 目标在 x86 主机上必不可执行，rc=$rc 属预期；这里断言的是判据链与三步准备)"
+ok7=1
+echo "$out" | grep -q 'RESULT_STEP_handoff=EXEC'                            || { echo "  7a 没打到 EXEC"; ok7=0; }
+[ -L "$W/by-name/system" ]                                                  || { echo "  7b by-name/system 没建"; ok7=0; }
+echo "$out" | grep -q 'RESULT_STEP_vendor=UNMOUNTED'                         || { echo "  7c 非 root 下 vendor 该报 UNMOUNTED(挂不上 tmpfs 也 bind 不上)"; ok7=0; }
+echo "$out" | grep -q 'RESULT_STEP_fstab=PLACED'                             || { echo "  7d fstab 没落到 /vendor/etc"; ok7=0; }
+[ -f "$W/vendor_fake/etc/fstab.z1" ]                                         || { echo "  7e 主机上没生成 fstab 文件"; ok7=0; }
+echo "$out" | grep -q 'RESULT_STEP_selinux=LOADED'                           || { echo "  7f selinux 没走 LOADED"; ok7=0; }
+cmp -s "$W/vendor_fake/etc/selinux/precompiled_sepolicy" "$W/selinux_fake/load" \
+                                                                            || { echo "  7g 喂进 load 的字节与策略文件不一致"; ok7=0; }
+grep -qx 0 "$W/selinux_fake/enforce"                                         || { echo "  7h enforce 没被兜成 0"; ok7=0; }
+[ $ok7 -eq 1 ] && echo "  CASE=7 PASS(by-name/fstab/selinux/exec 四段全通)" \
+              || { echo "  CASE=7 ***FAIL***"; echo "$out" | sed 's/^/      /'; fail=$((fail+1)); }
+
+echo "===== 8) 镜像里没有 fstab（device 层没投）-> 必须点名 MISS 而不是静默 ====="
+rm -f "$W/sys_a9_arm/etc/fstab.z1" "$W/vendor_fake/etc/fstab.z1"
+out=$(BB=$BB Z1_SYSBLOCK="$W/sys" Z1_SYSROOT="$W/sys_a9_arm" Z1_DISK="$DISK" Z1_NODEPREFIX="$W/dev" \
+       Z1_BYNAME_DIR="$W/by-name" Z1_VENDROOT="$W/vendor_fake" Z1_SELINUXFS="$W/no_such_selinux" \
+       Z1_HANDOFF_CONSOLE=/dev/stdout $BB sh -c "$BB sh $H go" 2>&1)
+echo "$out" | grep -E 'RESULT_STEP_fstab|RESULT_STEP_selinux' | sed 's/^/  /'
+echo "$out" | grep -q 'RESULT_STEP_fstab=MISS' && echo "$out" | grep -q 'RESULT_STEP_selinux=SKIP' \
+  && echo "  CASE=8 PASS(fstab MISS 与 selinux SKIP 都如实报)" \
+  || { echo "  CASE=8 ***FAIL***"; fail=$((fail+1)); }
 
 echo "====="
 [ $fail -eq 0 ] && echo "HANDOFF_SELFTEST=ALL_PASS" || { echo "HANDOFF_SELFTEST=FAIL($fail)"; exit 1; }

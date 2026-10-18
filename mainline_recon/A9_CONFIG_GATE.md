@@ -83,3 +83,21 @@ A9 侧不受影响的理由：minijail/zygote 用的是经典 BPF(`SO_FILTER`/`s
 产物里 `sk_filter*` 11 个符号仍在)；`bpfloader` 与 cgroup-bpf 是 Android 10+ 的东西；
 Pie 的 netd 走 iptables + `xt_quota2`(本仓 =m)。板上由探针 `seccomp_filter` 项与
 `[a9cfg]` 段自证。**GATE_Y 里的 CGROUP_BPF 已移出，GATE_N 加入 BPF_SYSCALL/CGROUP_BPF。**
+
+## 6. 出片环节的三条陷阱（2026-10-18 P9 加，都已实际踩到）
+
+陷阱 A —— **`pack` 的输出被管道截断会"假成功"**：把 `z1_a9_p2.sh pack` 接到 `| grep … | head -6`，
+`head` 读满就退，SIGPIPE 打死 pack，而日志里 `RESULT: VALID` / `PAYLOAD-OK` 已经打出来了 ——
+**镜像文件却没被重写**。本轮 D1 就这么留在上一版载荷里，靠"从成品镜像里把 ramdisk 与 dtb 解出来
+独立复核"才发现。与仓里已记的"别把 make 输出管道给 tail(吞 rc)"同源：**构建/出片命令一律
+`> 日志文件 2>&1`，再看文件**。
+
+陷阱 B —— **`pack <1b|4b>` 就地改 dts**：bus-width 与 DAT1-3 pinmux 由 pack 写进
+`arch/arm/boot/dts/mediatek/mt6572-z1.dts`，所以**最后一次 pack 决定源码树的状态**，
+仓库里 dts 的 bus-width 值不代表"基线是 1-bit"。本轮结束时树留在 1b 安全基线；
+每张镜像的变体只能靠内嵌 dtb 反解来认（`dtc -I dtb -O dts` 看 bus-width 与 initrd-end）。
+P8 之前提交的 dts 其实停在 4b 状态，P9 才把它扳回 1b。
+
+陷阱 C —— **ramdisk 一改，三处必须同步**：`linux,initrd-end`(dts) / 512B MTK 头 0x04 小端长度字段 /
+`pack` 重编的 dtb。`z1_a9_mkramdisk.sh` 会把 body 字节数与 initrd-end 一起打出来，
+`pack` 会现算并改写 dts、再反解 dtb 自证 —— 别手填。

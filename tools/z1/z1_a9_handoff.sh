@@ -16,6 +16,8 @@ set -u
 BB=${BB:-/bin/busybox}
 SYSROOT=${Z1_SYSROOT:-/system}
 BYNAME=${Z1_BYNAME_DIR:-/dev/block/by-name}
+VENDROOT=${Z1_VENDROOT:-/vendor}
+SELINUXFS=${Z1_SELINUXFS:-/sys/fs/selinux}
 NODEPREFIX=${Z1_NODEPREFIX:-/dev}
 SYSBLOCK=${Z1_SYSBLOCK:-/sys/class/block}
 CON=${Z1_HANDOFF_CONSOLE:-/dev/console}
@@ -160,12 +162,84 @@ go() {
     say "$SYSROOT 已有内容，跳过挂载"
   fi
 
-  # 非 Treble 分区的 A9 把 /vendor 放在 system 里；LOS16 A-only 常见 /system/vendor
-  [ -d "$SYSROOT/vendor" ] && { mkdir -p /vendor 2>/dev/null; $BB mount --bind "$SYSROOT/vendor" /vendor 2>/dev/null \
-      && say "/vendor bind 自 $SYSROOT/vendor"; }
   # LOS16 的 system-as-root 形态：/system 在挂载点下一层
   if [ ! -e "$SYSROOT/bin/init" ] && [ -e "$SYSROOT/system/bin/init" ]; then
     $BB mount -o bind "$SYSROOT/system" "$SYSROOT" 2>/dev/null && say "/system bind 下移一层"
+  fi
+
+  # ---- /vendor：A-only 的 LOS16 把 vendor 塞在 system 里，而它是只读的。
+  # A9 second-stage 只在 /vendor|/odm|/product 下找 fstab.<ro.boot.hardware>，
+  # 我们手里只有 device 层那份 fstab.z1（在 /system/etc），只读目录里放不进去，
+  # 所以把 vendor 换成 tmpfs 再整份拷进来 —— 换来一个可写的 /vendor/etc。
+  VSRC=""
+  for c in "$SYSROOT/vendor" "$SYSROOT/system/vendor"; do
+    [ -d "$c" ] && { VSRC=$c; break; }
+  done
+  if [ -n "$VSRC" ]; then
+    mkdir -p "$VENDROOT" 2>/dev/null
+    VKB=$($BB du -sk "$VSRC" 2>/dev/null | $BB awk '{print $1}')
+    VSZ=$(( ${VKB:-20480} / 1024 + 48 ))m
+    if $BB mount -t tmpfs -o "size=$VSZ" tmpfs /vendor 2>/dev/null && \
+       $BB cp -a "$VSRC/." "$VENDROOT/" 2>/dev/null; then
+      say "RESULT_STEP_vendor=TMPFS($VENDROOT 换成 tmpfs size=$VSZ，内容自 $VSRC)"
+    elif $BB mount --bind "$VSRC" "$VENDROOT" 2>/dev/null; then
+      say "RESULT_STEP_vendor=BIND($VENDROOT 只读自 $VSRC，fstab 多半投不进去)"
+    else
+      say "RESULT_STEP_vendor=UNMOUNTED($VSRC 没能挂到 $VENDROOT，下面仍按目录现状准备 fstab)"
+    fi
+  else
+    say "RESULT_STEP_vendor=NONE(镜像里没有 vendor 目录)"
+  fi
+
+  # ---- fstab：从 cmdline 的 androidboot.hardware= 取机型名，与 A9 同源
+  HW=$($BB cat /proc/cmdline 2>/dev/null | $BB tr ' ' '\n' | $BB sed -n 's/^androidboot.hardware=//p')
+  [ -n "$HW" ] || HW=z1
+  say "ro.boot.hardware 等价名=$HW(自 /proc/cmdline)"
+  FFOUND=""
+  for d in "$VENDROOT/etc" /odm/etc /product/etc; do
+    for f in "$d"/fstab.*; do [ -f "$f" ] && { FFOUND=$f; break; }; done
+    [ -n "$FFOUND" ] && break
+  done
+  if [ -n "$FFOUND" ]; then
+    say "RESULT_STEP_fstab=OK(已有 $FFOUND)"
+  else
+    FSRC=""
+    for c in "$SYSROOT/etc/fstab.$HW" "$SYSROOT/etc/fstab.z1" "$SYSROOT/system/etc/fstab.$HW"; do
+      [ -f "$c" ] && { FSRC=$c; break; }
+    done
+    if [ -n "$FSRC" ] && mkdir -p "$VENDROOT/etc" 2>/dev/null && $BB cp "$FSRC" "$VENDROOT/etc/fstab.$HW" 2>/dev/null; then
+      say "RESULT_STEP_fstab=PLACED($VENDROOT/etc/fstab.$HW 自 $FSRC)"
+    elif [ -n "$FSRC" ]; then
+      say "RESULT_STEP_fstab=FAIL(找到 $FSRC 但 $VENDROOT 不可写；A9 没 fstab 就挂不了 /data 与 /cache)"
+    else
+      say "RESULT_STEP_fstab=MISS(镜像里没有 fstab.$HW 与 fstab.z1，device 层没投？)"
+    fi
+  fi
+
+  # ---- SELinux：first-stage 该做的策略载入补上。second-stage 只调 SelinuxSetEnforcement，
+  # 策略没载过就直接判死；cil 需要 secilc 在板上编不动，所以只认 precompiled_sepolicy。
+  $BB mount -t selinuxfs selinux "$SELINUXFS" 2>/dev/null
+  if [ -e "$SELINUXFS/load" ]; then
+    POL=""
+    for c in "$VENDROOT/etc/selinux/precompiled_sepolicy" /odm/etc/selinux/precompiled_sepolicy \
+             /product/etc/selinux/precompiled_sepolicy $SYSROOT/vendor/etc/selinux/precompiled_sepolicy \
+             $SYSROOT/system/vendor/etc/selinux/precompiled_sepolicy; do
+      [ -f "$c" ] && { POL=$c; break; }
+    done
+    if [ -n "$POL" ]; then
+      if $BB cat "$POL" > "$SELINUXFS/load" 2>/dev/null; then
+        say "RESULT_STEP_selinux=LOADED($POL $($BB wc -c < "$POL" 2>/dev/null) B 字节已喂进 $SELINUXFS/load)"
+      else
+        say "RESULT_STEP_selinux=FAIL(load 被拒：策略版本高于内核 SELinux 上限，或镜像里那份是给 stock 3.4 编的)"
+      fi
+    else
+      say "RESULT_STEP_selinux=NOPOLICY(没有 precompiled_sepolicy；permissive 下 A9 仍可能因无标签而挂)"
+    fi
+    if [ -e "$SELINUXFS/enforce" ]; then
+      echo 0 > "$SELINUXFS/enforce" 2>/dev/null && say "enforce=0(兜 dts 的 androidboot.selinux=permissive)"
+    fi
+  else
+    say "RESULT_STEP_selinux=SKIP($SELINUXFS/load 不在：内核未开 SECURITY_SELINUX 或挂不上)"
   fi
 
   INIT=$SYSROOT/bin/init
@@ -174,8 +248,6 @@ go() {
     say "RESULT_STEP_handoff=FAIL(可执行的 A9 init 不存在)"
     exit 1
   fi
-  # 交棒后 A9 init 自己建 devpts/ashmem 绑定、cgroup 与 property 存储；
-  # 我们只保证 /proc /sys /dev 在位、SELinux 由 dts 的 androidboot.selinux=permissive 决定。
   say "RESULT_STEP_handoff=EXEC($INIT second_stage)"
   say ">>> 以下为 A9 init 自己的日志，串口上会接续出现 ===="
   exec "$INIT" second_stage

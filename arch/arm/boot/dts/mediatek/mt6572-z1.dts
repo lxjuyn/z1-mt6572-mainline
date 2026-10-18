@@ -64,7 +64,7 @@
 		 * channel for S6 which has no UART testpoints.
 		 */
 		linux,initrd-start = <0x84100000>;
-		linux,initrd-end = <0x84238939>;
+		linux,initrd-end = <0x84238db9>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
@@ -429,7 +429,7 @@
 		     "mediatek,mt2701-mmc";
 	pinctrl-0 = <&mmc0_pins>;
 	pinctrl-names = "z1-validated";
-	bus-width = <4>;
+	bus-width = <1>;
 	max-frequency = <50000000>;
 	no-sd;
 	no-sdio;
@@ -473,10 +473,7 @@
 
 		pins-cmd-dat {
 			pinmux = <MT6572_PIN_45_MC0_CMD__FUNC_MC0_CMD>,
-				 <MT6572_PIN_46_MC0_DAT0__FUNC_MC0_DAT0>,
-				 <MT6572_PIN_47_MC0_DAT1__FUNC_MC0_DAT1>,
-				 <MT6572_PIN_48_MC0_DAT2__FUNC_MC0_DAT2>,
-				 <MT6572_PIN_49_MC0_DAT3__FUNC_MC0_DAT3>;
+				 <MT6572_PIN_46_MC0_DAT0__FUNC_MC0_DAT0>;
 			input-enable;
 			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
 			/* Vendor eMMC setup uses 6 mA for CLK/CMD/DAT. */

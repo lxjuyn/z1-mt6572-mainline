@@ -1,21 +1,30 @@
-# A9 P9 构建台账 2026-10-18 (交棒链：不等 AOSP ramdisk 也能拉起 A9 system)
+# A9 P9 构建台账 2026-10-18 (交棒链：不等 AOSP ramdisk 也能拉起 A9 system；含 vendor/fstab/selinux 兜底)
 
-branch=wip/a9-mainline HEAD=be10d0c19e4d7194e0bb073bd0b8cbe526d1d60f kernelrelease=7.0.0-rc7-z1+
+branch=wip/a9-mainline HEAD=0976dfcdb3c599eccba4510ee8726b329af08a5b kernelrelease=7.0.0-rc7-z1+
 
-     4350464  a9_wt/arch/arm/boot/zImage
-     5656576  out/boot_mainline_a9p9_D1_1b.img
-     5656576  out/boot_mainline_a9p9_D4_4b.img
-     1280825  out/ramdisk_a9p9.gz
-  sha 3ecb439c0c8ec51711d6eaeea433ce89be47024bd6467361a43916676e366615  out/ramdisk_a9p9.gz
-  sha 84645edaeff808ae1e219b4be4b1a131883eda2e51d6f03e227e1a8495138897  out/boot_mainline_a9p9_D1_1b.img
-  sha 69065082e40945b9c7c829253fdd130f0d1456dd6bd1a68055bcc6974b143e85  out/boot_mainline_a9p9_D4_4b.img
-  sha c0084f1e3251ef15ae1caeb0f006f801f8c6f9daf506b8c7301c1ad15fb1a9f7  a9_wt/arch/arm/boot/zImage
+     1281977 2ef3b09ace72201c71e7e789a240c18ecee8d2dcef37d4b91aeb47b004d0f18c  out/ramdisk_a9p9.gz
+     5656576 d7b428c1fccdd9c09d8b416503524b9372ef396e8fa02ec9929374d90c04625a  out/boot_mainline_a9p9_D1_1b.img
+     5656576 e96718d6772b20ad50eab3291cc11d0bc2adb5969428fdf82427871a074e41e2  out/boot_mainline_a9p9_D4_4b.img
+     4350464 c0084f1e3251ef15ae1caeb0f006f801f8c6f9daf506b8c7301c1ad15fb1a9f7  a9_wt/arch/arm/boot/zImage
+       10572 2b672069c5d0e5132c26a84c7b620946f54db1ebb87b983a2d43b7d71a48464e  a9_wt/net/netfilter/xt_quota2.ko
+       14808 8b28e4294e437345fd039fe7a83f9453c727fede35ae0fae5e4dab4b42a65d48  a9_wt/net/netfilter/xt_IDLETIMER.ko
 
-新增：tools/z1/z1_a9_handoff.sh(probe|go)、z1_a9_mkramdisk.sh(装配前 sh -n + 成品回读对账)、
-      init_v13_9_a9handoff.src([a9hand] 段 + 把 [a9dev] 搬出 else)、两份 selftest。
-ramdisk body 1,280,313 -> dts initrd-end=0x84238939（dts 已随之改写并入库）。
-镜像 5,656,576 B（p8 5,652,480，+4,096）；boot 余量 634,880 B；A9 ramdisk 上限 1,917,100 B。
-两变体 RESULT: VALID + VERIFY=OK(bus-width 01/04、androidboot 两参、initrd-end 反解一致) + PAYLOAD-OK 双载荷逐字节。
-包：out/A9_flashpkg_p9_D1、out/A9_flashpkg_p9_D4（boot-only，scatter 只放行 bootimg）。
-判据回归：HANDOFF_SELFTEST=ALL_PASS 7/7；SYS_ACCEPT 侧 SYS=ALL_PASS 4/4（含真 4.4 镜像 REJECT）。
-板上判据见 mainline_recon/A9_HANDOFF_20261018.md §4；未上板。
+ramdisk_a9p9.gz: body=1,281,465 -> dts linux,initrd-end=0x84238db9（dts 随之入库）；条目 68(+交棒脚本)。
+装配线 z1_a9_mkramdisk.sh：装配前 busybox sh -n 双脚本静态门，打包后从成品 .gz 回读对账，CHK_FAIL=0 RD_BUILD=OK。
+镜像 5,656,576 B；boot 余量 634,880 B；A9 ramdisk 上限 1,917,100 B。
+两变体：RESULT VALID + VERIFY=OK(bus-width 01/04、androidboot 两参、initrd-end 反解一致) + PAYLOAD-OK 双载荷逐字节。
+包：out/A9_flashpkg_p9_D1、out/A9_flashpkg_p9_D4（boot-only；scatter 只放行 bootimg，9 个分区强制不下载）。
+判据回归：HANDOFF_SELFTEST=ALL_PASS 8/8；system 侧 SELFTEST=ALL_PASS 4/4（含真实 1/system.img REJECT）。
+取料机制已实测并写进 mainline_recon/A9_HANDOFF_20261018.md §7：真下载口是
+  https://mirrorbits.lineageos.org/full/<device>/<date>/<file>.zip（302 到镜像），
+  JSON 是 https://download.lineageos.org/api/v2/devices/<codename>/builds；
+  但 ham/find7/kccat6/lentislte/r5/m0 的 16.0 全部返 []，mirrorbits 对 16.0/ham/... 返真 404，
+  USTC 镜像 full/ham/ 404 —— 官方源已下架 A9 arm32，本机取不到，只能由持镜像的机器交。
+缺的唯一输入：一份真实 arm32 A9 system.img。交来后本机三步出全片（A9_HANDOFF §6）。未上板。
+两条本轮踩到的操作陷阱（都与"看起来成功"有关，写下来免得下轮再踩）：
+1) 把 pack 的输出管道给 `head -6` 会被 SIGPIPE 打死，日志照样打出 PAYLOAD-OK，**镜像文件却没被重写**
+   —— 与仓里已记的"别把 make 输出管道给 tail(吞 rc)"是同一类。跑构建命令一律重定向到文件再看。
+2) `pack <1b|4b>` 会**就地改 dts**（bus-width 与 DAT1-3 pinmux），所以最后一次 pack 决定树的状态。
+   本轮结束时树留在 1b 安全基线；镜像各自的变体由 pack 现验（内嵌 dtb 反解 bus-width 01/04）。
+独立复核（不信 pack 自己的话）：从每张镜像里解出内嵌 dtb 用 dtc 反解
+   -> D1: bus-width=01 initrd-end=0x84238db9；D4: bus-width=04 同值；两张的 ramdisk 均逐字节在位。
