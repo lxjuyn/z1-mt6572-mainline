@@ -54,8 +54,8 @@ if [ -n "$SYS" ]; then
   python3 - "$SYS" <<'PY' || die "system.img 既不是 sparse 也不是 ext4"
 import struct,sys
 f=open(sys.argv[1],'rb'); m=f.read(4)
-f.seek(1024+56); sb=f.read(2)
-sparse = struct.unpack('<I', m)[0] == 0x3AFF26AF
+f.seek(1024+56); sb=f.read(2)  # ext4 s_magic 在超级块内 +56
+sparse = struct.unpack('<I', m)[0] == 0xED26FF3A
 ext4   = sb == b'\x53\xef'
 print('system.img 形态: sparse=%s ext4=%s' % (sparse, ext4))
 sys.exit(0 if (sparse or ext4) else 1)

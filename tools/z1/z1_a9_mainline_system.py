@@ -29,7 +29,7 @@ SELF = Path(__file__).resolve().parent
 WT = SELF.parent.parent                    # .../a9_wt
 ROOT = WT.parent                           # 工作区根
 ANDROID_PART_LIMIT = 943_718_400           # android(p4) = 0x38400000
-SPARSE_MAGIC = 0x3AFF26AF
+SPARSE_MAGIC = 0xED26FF3A   # Android sparse 的真 magic
 
 # 本仓 mainline 版 device 层文件（本机已用 devcheck 核过与内核一致）
 MAINLINE_ROOTDIR = WT / 'android9' / 'mainline' / 'rootdir'
@@ -65,18 +65,31 @@ def dbg_script(image, lines, write=True, timeout=120):
 
 
 def image_write(image, hostfile, dest, mode='0644'):
-    """把主机文件写到镜像内绝对路径 dest，必要时逐级建目录；写完读回校验。"""
-    parent = os.path.dirname(dest) or '/'
-    name = os.path.basename(dest)
-    lines, cur = [], '/'
-    for seg in [x for x in parent.split('/') if x]:
-        cur = cur + seg
-        lines.append('mkdir %s' % cur)        # 已存在时 debugfs 会报错，用 cd 兜住
-    lines.append('cd %s' % parent)
-    lines.append('write %s %s' % (hostfile, name))
-    lines.append('set_inode_field /%s %s mode %s' % (dest.lstrip('/'), name, mode))
-    dbg_script(image, lines)
+    """把主机文件写到镜像内绝对路径 dest，必要时逐级建目录；写完读回校验。
+
+    debugfs 的 `mkdir`/`write` 第二个参数都是**相对当前目录**的名字，不是绝对路径：
+    直接喂 `/vendor/etc` 这种多级新目录时，它会静默把条目写成根下一个怪名字，
+    于是读回 0 B（第一次拿真 A9 GSI 投 /vendor/etc/fstab.z1 就是这样 ABORT 的）。
+    所以这里逐级 cd/mkdir，每级先用 exists() 判存在，最后 write + set_inode_field。
+    """
+    parts = [x for x in dest.split('/') if x]
+    name = parts.pop()
+    cwd = '/'
+    for seg in parts:
+        target = ('' if cwd == '/' else cwd) + '/' + seg
+        if not exists(image, target):
+            dbg_script(image, ['cd %s' % cwd, 'mkdir %s' % seg])
+            if not exists(image, target):
+                raise RuntimeError('建目录失败 %s' % target)
+        cwd = target
+    dbg_script(image, ['cd %s' % cwd, 'write %s %s' % (hostfile, name)])
+    dbg_script(image, img_mode(image, dest, mode))
     return dbg(image, 'cat %s' % dest)
+
+
+def img_mode(image, dest, mode):
+    """set_inode_field 的 mode 要写成八进制数(不带前导 0 也行)，且必须用绝对路径。"""
+    return ['set_inode_field %s mode %s' % (dest, mode)]
 
 
 def exists(image, path):
@@ -91,6 +104,18 @@ def exists(image, path):
 
 
 NAME_RE = re.compile(r'(\d+)\s+\((\d+)\)\s+(\S+)')
+
+
+def dir_kind(image, path):
+    """'dir' / 'link' / 'missing'。GSI 的 /vendor 是**符号链接**，
+    debugfs 的 `cd` 进不去、`write` 会静默落到别处，读回 0 B —— 必须先分辨。"""
+    r = subprocess.run(['debugfs', '-R', 'stat %s' % path, str(image)],
+                       capture_output=True, timeout=30)
+    blob = (r.stdout + r.stderr).decode(errors='replace')
+    if 'Type:' not in blob:
+        return 'missing'
+    m = re.search(r'Type:\s+(\S+)', blob)
+    return (m.group(1) if m else 'unknown')
 
 
 def ls_dir(image, path):
@@ -135,45 +160,16 @@ def ls_all(image, timeout=180):
     return ''
 
 
-CHUNK_RAW, CHUNK_FILL, CHUNK_DC, CHUNK_CRC = 0xCAC1, 0xCAC2, 0xCAC3, 0xCAC4
-
-
 def to_raw(image, workdir):
-    """LOS16 常交回 sparse image；本机没有 simg2img，所以内置一个只读转换器。"""
-    import struct
-    head = open(image, 'rb').read(4)
-    if struct.unpack('<I', head)[0] != SPARSE_MAGIC:
+    """LOS16/GSI 常交回 Android sparse image。真实格式是 magic 0xED26FF3A + 28B 头 +
+    12B 块头，且 DONT_CARE **必须推进输出偏移** —— 本仓原先那份手写实现把两者都写错了
+    (magic 0x3AFF26AF、按 9 个 u32 解头、DONT_CARE 不 seek)，第一次拿真镜像跑就把根
+    inode 写坏、e2fsck 直接把 /system 清成空壳。现在统一走 z1_a9_sparse2raw。"""
+    import z1_a9_sparse2raw as s2r
+    if not s2r.is_sparse(image):
         return Path(image), False
     raw = Path(workdir) / 'system_raw.img'
-    with open(image, 'rb') as f, open(raw, 'wb') as o:
-        (magic, major, minor, fh_sz, ch_sz, blk_sz, total_blks, total_chunks, _m) = \
-            struct.unpack('<9I', f.read(36))
-        f.seek(fh_sz)
-        pos, chunks = 0, 0
-        while chunks < total_chunks:
-            hdr = f.read(ch_sz)
-            if len(hdr) < ch_sz:
-                break
-            ctype, _rsv, csize, cblocks = struct.unpack('<4I', hdr[:16])
-            payload = csize - ch_sz
-            if ctype == CHUNK_RAW:
-                data = f.read(payload)
-                o.seek(pos); o.write(data); pos += len(data)
-            elif ctype == CHUNK_FILL:
-                data = f.read(payload)
-                o.seek(pos); o.write(data * cblocks); pos += blk_sz * cblocks
-            elif ctype == CHUNK_DC:
-                f.read(payload)
-                pos += blk_sz * cblocks
-            elif ctype == CHUNK_CRC:
-                f.read(payload)
-            else:
-                raise RuntimeError('未知 sparse chunk 类型 0x%X' % ctype)
-            chunks += 1
-        # sparse 里 RAW chunk 通常已按块对齐；补零到 total_blks*blk_sz 保证 ext4 完整
-        want = total_blks * blk_sz
-        if pos < want:
-            o.seek(want - 1); o.write(b'\0')
+    s2r.to_raw(str(image), str(raw), verbose=False)
     return raw, True
 
 
@@ -286,24 +282,82 @@ def main():
             report['actions'].append(entry)
 
         # --- 3) 落 mainline device 层文件 ---
-        for f in sorted(MAINLINE_ROOTDIR.iterdir()):
-            dest = '/system/etc/%s' % f.name
-            content = f.read_bytes()
-            entry = {'op': 'install', 'path': dest, 'src': str(f.relative_to(WT)),
-                     'sha256': sha(content), 'size': len(content)}
-            if a.dry_run:
-                entry['dry_run'] = True
+        # 镜像内 system 内容可能在根（A-only/Treble GSI：分区挂到 /system，所以根就是 system 内容），
+        # 也可能在 /system 子目录（system-as-root）。前一种情况写死 /system/etc 会把文件投进
+        # 一个新建的空目录，读回必然不一致 —— 第一次拿真 A9 GSI 跑就是这样 ABORT 的。
+        if exists(img, '/build.prop') or exists(img, '/bin'):
+            P = ''
+        else:
+            P = '/system'
+        report['system_prefix'] = P or '(根即 system)'
+        # 只有 /vendor 是**真目录**时才能当落点；GSI 里它常是符号链接（见 dir_kind）
+        VP = None
+        for cand in ('/vendor', '/system/vendor'):
+            if dir_kind(img, cand) == 'dir' and not cand.startswith(P + '/vendor') or                (P == '' and dir_kind(img, cand) == 'dir'):
+                if dir_kind(img, cand) == 'dir':
+                    VP = cand
+                    break
+        report['vendor_prefix'] = VP
+        report['vendor_kind'] = {c: dir_kind(img, c) for c in ('/vendor', '/system/vendor')}
+        # 每个文件给出**多个候选落点**：A9 具体扫哪几个路径本机无法离线确认，所以两处都放，
+        # 且一律用带 .z1 后缀的新文件，绝不覆盖 AOSP 自己的 ueventd.rc / fstab.*。
+        TARGETS = {
+            'init.z1.rc': [P + '/etc/init/hw/init.z1.rc'] + ([VP + '/etc/init/hw/init.z1.rc'] if VP else []),
+            'init.z1.network.rc': [P + '/etc/init/z1_network.rc'],
+            'ueventd.z1.rc': [P + '/etc/ueventd.z1.rc'] + ([VP + '/etc/ueventd.z1.rc'] if VP else []),
+            'fstab.z1': ([VP + '/etc/fstab.z1'] if VP else []) + [P + '/etc/fstab.z1'],
+            # 设备级 manifest：有真 /vendor 就投 A9 认的位置；否则投一个不会与
+            # AOSP 框架 manifest(/system/etc/vintf/manifest.xml) 撞名的中转名，
+            # 由交棒脚本在运行时把它放进可写的 /vendor/manifest.xml。
+            'manifest.xml': ([VP + '/manifest.xml'] if VP else [P + '/etc/z1_device_manifest.xml']),
+            'z1_usb_setup.sh': [P + '/bin/z1_usb_setup.sh'],
+        }
+        # A-only 的 GSI 不带 A9 自己的 PID1（init/ueventd），而整机能不能起就卡在这两个二进制上。
+        # 所以把它们做成**普通输入件**：仓里放了就一并投进 <P>/bin，没放就照常报缺。
+        SEED = MAINLINE_ROOTDIR / 'bin'
+        for nm in ('init', 'ueventd'):
+            f = SEED / nm
+            if f.is_file():
+                TARGETS[nm] = [P + '/bin/' + nm]
             else:
-                tmp = Path(work) / f.name
-                tmp.write_bytes(content)
+                report['notes'].append('缺输入件 %s（A-only GSI 不提供 A9 的 PID1，'
+                                       '补上后本机就能把 system 改成自足版）' % f.relative_to(WT))
+        placed, skipped = [], []
+        for f in sorted(x for x in MAINLINE_ROOTDIR.iterdir() if x.is_file()):
+            dests = TARGETS.get(f.name)
+            if dests is None:
+                skipped.append((f.name, '本工具没有为它定义落点'))
+                continue
+            content = f.read_bytes()
+            tmp = Path(work) / f.name
+            tmp.write_bytes(content)
+            for dest in dests:
+                entry = {'op': 'install', 'path': dest, 'src': str(f.relative_to(WT)),
+                         'sha256': sha(content), 'size': len(content)}
+                if a.dry_run:
+                    entry['dry_run'] = True
+                    report['actions'].append(entry)
+                    continue
                 if exists(img, dest):
                     dbg(img, 'rm %s' % dest, write=True)
                 back = image_write(img, tmp, dest)
                 if back != content:
-                    print('ABORT: %s 读回不一致' % dest); return 3
+                    print('ABORT: %s 读回不一致（期望 %d B 实得 %d B）' % (dest, len(content), len(back)))
+                    return 3
                 entry['verified'] = 'readback_ok'
-            report['actions'].append(entry)
-        print('已投递 mainline device 层文件 %d 份' % len(list(MAINLINE_ROOTDIR.iterdir())))
+                report['actions'].append(entry)
+                placed.append(dest)
+            # 0755 只对脚本有意义，其余 0644
+            if f.name.endswith('.sh'):
+                dbg(img, 'set_inode_field %s mode 100755' % dests[-1], write=True)
+        report['placed'] = placed
+        report['skipped_src'] = skipped
+        print('已投递 mainline device 层：源文件 %d 份 -> 落点 %d 处（system 前缀=%s，vendor=%s）'
+              % (len([x for x in MAINLINE_ROOTDIR.iterdir() if x.is_file()]), len(placed), P or '(根即 system)', VP or '无'))
+        if skipped:
+            report['notes'].append('未定义落点的源文件: %s' % skipped)
+        report['notes'].append('A9 具体扫描的 rc/ueventd/manifest 路径本机无法离线确认，'
+                               '故同一文件放了多个候选落点，且都用 .z1 后缀不覆盖 AOSP 原件')
 
         # --- 4) 属性残留检查 ---
         props = [k for k in allfiles if k.endswith('build.prop') or k.endswith('default.prop')]

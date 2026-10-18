@@ -1,0 +1,18 @@
+# A9 P10 构建台账 2026-10-18 (真实 A9 arm32 system 到手：phhusson GSI v123 + 交棒链适配)
+
+branch=wip/a9-mainline HEAD=34478d2f9be6d3d626dd73e6f8cc9258272a3740 kernelrelease=7.0.0-rc7-z1+
+
+     339017396 cde1bbf6581d04930c1c44d051666dcccfcf230cae7c07bb1e566be086adb5fa  out/gsi_v123/system.img.xz
+     973586676 9415289c2abf897e8dbbca727a55493f701ff68c4fb47686468941f53c81a84a  out/gsi_v123/system.img
+     929792000 eda67e68ae369c44c66f53678a118583a0b6301661189cac9a537124a16a1682  out/gsi_v123/system.raw.img
+     929792000 459b5659253d41d04fbafd777ca461cb875a74c28588d9b1e390bc9cd91682d6  out/a9sys_gsi/system_mainline.img
+       5656576 d7b428c1fccdd9c09d8b416503524b9372ef396e8fa02ec9929374d90c04625a  out/A9_flashpkg_p10_gsi_preinit/boot.img
+     929792000 459b5659253d41d04fbafd777ca461cb875a74c28588d9b1e390bc9cd91682d6  out/A9_flashpkg_p10_gsi_preinit/system.img
+
+system 侧改动：删 /lib/vndk-26(57M)+/lib/vndk-27(58M)+/framework/oat(39M)；resize2fs -f 到 227000 块 -> 929,792,000 B ≤ android 943,718,400 B。
+改造：6 处 device 层落点读回一致；hwservicemanager 的 disabled 已去掉；ADAPT_REPORT.json 留痕。
+验收：sdk=28 / abi=armeabi-v7a / ELF EM_ARM / vintf / sepolicy 形状 / dev_layer 全 OK，唯一 FAIL=缺 init+ueventd（A-only GSI 刻意不带 A9 的 PID1）。
+回归：SPARSE_SELFTEST=ALL_PASS 5/5（含真 GSI 展开 1,313,583,104 B 与 dumpe2fs 卷名 system）；HANDOFF_SELFTEST 8/8；SYS_ACCEPT 自测 4/4；flashpkg 真件正/负路各一次。
+包：out/A9_flashpkg_p10_gsi_preinit（boot+system+scatter 只放行 bootimg,android；9 个分区强制不下载）。
+性质：预交棒诊断包 —— 刷它拿的是分区识别/by-name/fstab/SELinux 四步的板上真值，不是安卓成品；
+      补 android9/mainline/rootdir/bin/{init,ueventd} 两个 EM_ARM 二进制后重跑 adapter，闸才放行。未上板。

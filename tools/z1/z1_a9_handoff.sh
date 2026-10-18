@@ -113,7 +113,7 @@ probe() {
     say "RESULT_STEP_handoff_probe=FAIL(abi=$ABI 是 arm64，本内核 32 位跑不了)"
     umount "$SYSROOT" 2>/dev/null; return 1;; esac
   BIN=""
-  for c in "$SYSROOT/bin/init" "$SYSROOT/system/bin/init"; do
+  for c in "$SYSROOT/bin/init" "$SYSROOT/system/bin/init" "$SYSROOT/xbin/init"; do
     [ -f "$c" ] && { BIN=$c; break; }
   done
   if [ -z "$BIN" ]; then
@@ -207,6 +207,12 @@ go() {
     for c in "$SYSROOT/etc/fstab.$HW" "$SYSROOT/etc/fstab.z1" "$SYSROOT/system/etc/fstab.$HW"; do
       [ -f "$c" ] && { FSRC=$c; break; }
     done
+    for m in "$SYSROOT/etc/z1_device_manifest.xml" "$SYSROOT/system/etc/z1_device_manifest.xml"; do
+      if [ -f "$m" ] && [ ! -f "$VENDROOT/manifest.xml" ]; then
+        $BB cp "$m" "$VENDROOT/manifest.xml" 2>/dev/null && say "RESULT_STEP_manifest=PLACED($VENDROOT/manifest.xml 自 $m)"
+        break
+      fi
+    done
     if [ -n "$FSRC" ] && mkdir -p "$VENDROOT/etc" 2>/dev/null && $BB cp "$FSRC" "$VENDROOT/etc/fstab.$HW" 2>/dev/null; then
       say "RESULT_STEP_fstab=PLACED($VENDROOT/etc/fstab.$HW 自 $FSRC)"
     elif [ -n "$FSRC" ]; then
@@ -242,10 +248,33 @@ go() {
     say "RESULT_STEP_selinux=SKIP($SELINUXFS/load 不在：内核未开 SECURITY_SELINUX 或挂不上)"
   fi
 
-  INIT=$SYSROOT/bin/init
-  [ -x "$INIT" ] || INIT=$SYSROOT/system/bin/init
-  if [ ! -x "$INIT" ]; then
-    say "RESULT_STEP_handoff=FAIL(可执行的 A9 init 不存在)"
+  # A-only 的 GSI（如 phhusson v123）刻意不带 /system/bin/init 与 /system/bin/ueventd：
+  # 它假定设备的 boot ramdisk 提供 first-stage。因此允许从 ramdisk 里喂这两个二进制，
+  # 但 A9 的 rc 里写的是绝对路径 /system/bin/init、/system/bin/ueventd，
+  # 所以得把它们**种进 /system/bin**：这一步只在这两个路径本来不存在时做一次，
+  # 用 rw 挂载 -> cp -> sync -> 立即回 ro，不改变镜像在分区上的长期形态。
+  if [ ! -x "$SYSROOT/bin/init" ] && [ -f /sbin/a9_init ]; then
+    $BB mount -o remount,rw "$SYSROOT" 2>/dev/null
+    if $BB mount | $BB grep " on $SYSROOT " | $BB grep -q 'rw'; then
+      cp /sbin/a9_init "$SYSROOT/bin/init" 2>/dev/null && chmod 755 "$SYSROOT/bin/init"
+      [ -f /sbin/a9_ueventd ] && cp /sbin/a9_ueventd "$SYSROOT/bin/ueventd" 2>/dev/null && chmod 755 "$SYSROOT/bin/ueventd"
+      $BB sync
+      $BB mount -o remount,ro "$SYSROOT" 2>/dev/null
+      say "RESULT_STEP_seed=$([ -x "$SYSROOT/bin/init" ] && echo OK || echo FAIL)(init/ueventd 自 ramdisk 种入 $SYSROOT/bin)"
+    else
+      say "RESULT_STEP_seed=FAIL(/system 无法临时转 rw)"
+    fi
+  fi
+
+  INIT=""
+  for c in "$SYSROOT/bin/init" "$SYSROOT/system/bin/init" "$SYSROOT/xbin/init" /sbin/a9_init; do
+    [ -x "$c" ] && { INIT=$c; break; }
+  done
+  if [ -z "$INIT" ]; then
+    # A-only 的 GSI（如 phhusson v123）刻意不带 /system/bin/init —— 它假定设备的 boot ramdisk
+    # 提供 first-stage。此时需要外部把 arm32 的 A9 init 投进 ramdisk 的 /sbin/a9_init。
+    say "RESULT_STEP_handoff=FAIL(没找到可执行的 A9 init：查过 $SYSROOT/bin/init、$SYSROOT/system/bin/init、$SYSROOT/xbin/init、/sbin/a9_init)"
+    say "缺的是 A9 自己的 PID1(init/ueventd)，不是 system 内容；见 A9_GSI_20261018.md"
     exit 1
   fi
   say "RESULT_STEP_handoff=EXEC($INIT second_stage)"
