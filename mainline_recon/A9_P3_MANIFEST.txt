@@ -1,0 +1,19 @@
+# A9 P3 构建台账 2026-10-18 (A9 网络面/看门狗/ACL 补齐 + mainline device 层)
+branch=wip/a9-mainline P2_HEAD=c715564f9d75040d2834dae36691405fb24a08b9 baseline=ffdff0653(main) kernelrelease=7.0.0-rc7-z1+
+ramdisk body=1276023 -> linux,initrd-end=0x84237877  boot 上限=6291456
+
+  4608512 f0ca4abe2ca695a0ba5f0a70954cacef671797914d0ddb91e05ec8ed5a7e81eb  zImage
+    19808 5e16ea6c8cf5aca0e3a4cf42a36c4af172d840fe71e08842032287174b6a5c09  dtb(树内=4-bit)
+  1276535 2d066f75d7255722d7803d384c09b0423344b5bb7c00c83f928d2aefca81a676  ramdisk_a9p1.gz
+  5910528 2372edb60ebc20c7d68744af9c249c5d11ca3eea38ee902a7bb3bc5de8d3d43f  out/boot_mainline_a9p3_D1_1b.img
+  5910528 89ee7983799802ff7c6ffb2d20f46a6f4ffdc055b1940a387a5b965b1ed71bb0  out/boot_mainline_a9p3_D4_4b.img
+    10572 8e2b7680a64a7329c8fe387f426bab10a71789c636ed252c8292343af2e56a51  xt_quota2.ko
+    14808 22a487b05c0d5fe2d2d9eadfe177c2dce482e04dbac86781e32ef933948bd5d7  xt_IDLETIMER.ko
+   174068 4bb2e0ff33f147706afcaae56204f6f55d4109e079ead67123a91f0ba4c5d848  .config
+
+P2->P3 变化: zImage 4555264 -> 4608512 (+53248 B)  余量 434176 -> 380928 B  A9 ramdisk 上限约 1659052 B
+两图唯一实质差异仍是 &mmc0 bus-width <1>/<4> + DAT1-3 pinmux；validate 均 RESULT: VALID，
+打包后从镜像内反解 DTB 复核 bus-width/initrd-end/androidboot 均 VERIFY=OK。
+tools/z1/z1_a9_devcheck.sh -> DEVCHAIN_FAIL=0（ueventd 节点/三域建节点路径/functionfs/zram/
+ext4 ACL/mmc0 okay/.ko vermagic/manifest transport/探针覆盖面 全过）。
+归档=bridge_backups/products/a9p3_20261018_095858/

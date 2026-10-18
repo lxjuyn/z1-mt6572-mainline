@@ -54,6 +54,45 @@ GATE_Y=(
   CONFIG_USB CONFIG_USB_GADGET CONFIG_USB_CONFIGFS CONFIG_USB_F_FS CONFIG_USB_CONFIGFS_F_FS
 )
 GATE_M=(CONFIG_NETFILTER_XT_MATCH_QUOTA2 CONFIG_NETFILTER_XT_TARGET_IDLETIMER CONFIG_TOUCHSCREEN_EDT_FT5X06)
+# A9 netd/VpnService/data 挂载真正需要的符号（本轮实测发现基线里是缺的）：
+# netd 开机即下发 iptables 规则，缺表/缺 match 会让 netd 起不来，进而拖死 system_server。
+# 逐项依据见 mainline_recon/A9_NETD_NETFILTER.md
+ANDROID_ON=(
+  # 基线里 NETDEVICES 是关的：TUN(VpnService 要的 /dev/net/tun)、NET_CORE 与所有网卡驱动
+  # 都挂在 `if NETDEVICES` 下，所以 A9 一侧完全起不来。注意 loopback 不在此列 ——
+  # drivers/net/Makefile 第 23 行是 `obj-$(CONFIG_NET) += loopback.o`，lo 一直都在，
+  # 不要因为"没有 lo"这种错误理由去开这个符号。
+  CONFIG_NETDEVICES
+  CONFIG_NET_CORE
+  CONFIG_TUN
+  CONFIG_NETFILTER_XTABLES_LEGACY
+  CONFIG_FS_POSIX_ACL CONFIG_EXT4_FS_POSIX_ACL
+  CONFIG_IP_NF_IPTABLES_LEGACY CONFIG_IP6_NF_IPTABLES_LEGACY
+  CONFIG_IP_NF_FILTER CONFIG_IP_NF_MANGLE CONFIG_IP_NF_NAT CONFIG_IP_NF_RAW
+  CONFIG_IP_NF_TARGET_REJECT CONFIG_IP_NF_TARGET_MASQUERADE CONFIG_IP_NF_TARGET_REDIRECT
+  CONFIG_IP6_NF_IPTABLES CONFIG_IP6_NF_FILTER CONFIG_IP6_NF_MANGLE CONFIG_IP6_NF_NAT
+  CONFIG_IP6_NF_RAW CONFIG_IP6_NF_MATCH_AH CONFIG_IP6_NF_MATCH_IPV6HEADER
+  CONFIG_IP6_NF_MATCH_FRAG CONFIG_IP6_NF_MATCH_HL CONFIG_IP6_NF_MATCH_RT
+  CONFIG_IP6_NF_TARGET_REJECT CONFIG_IP6_NF_TARGET_MASQUERADE
+  CONFIG_NF_CONNTRACK_MARK CONFIG_NF_CONNTRACK_EVENTS CONFIG_NF_CONNTRACK_TIMESTAMP
+  CONFIG_NF_CONNTRACK_TIMEOUT CONFIG_NF_CONNTRACK_ZONES CONFIG_NF_CONNTRACK_SECMARK
+  CONFIG_NF_SOCKET_IPV4 CONFIG_NF_SOCKET_IPV6
+  CONFIG_NETFILTER_XT_MATCH_ADDRTYPE CONFIG_NETFILTER_XT_MATCH_COMMENT
+  CONFIG_NETFILTER_XT_MATCH_CONNMARK CONFIG_NETFILTER_XT_MATCH_CONNTRACK
+  CONFIG_NETFILTER_XT_MATCH_MAC CONFIG_NETFILTER_XT_MATCH_MARK
+  CONFIG_NETFILTER_XT_MATCH_MULTIPORT CONFIG_NETFILTER_XT_MATCH_OWNER
+  CONFIG_NETFILTER_XT_MATCH_SOCKET CONFIG_NETFILTER_XT_MATCH_TCPMSS
+  CONFIG_NETFILTER_XT_MATCH_CGROUP CONFIG_NETFILTER_XT_MATCH_LIMIT
+  CONFIG_NETFILTER_XT_TARGET_CONNMARK CONFIG_NETFILTER_XT_TARGET_DSCP
+  CONFIG_NETFILTER_XT_TARGET_LOG CONFIG_NETFILTER_XT_TARGET_MARK
+  CONFIG_NETFILTER_XT_TARGET_TCPMSS CONFIG_NETFILTER_XT_TARGET_NFLOG
+  CONFIG_NETFILTER_XT_NAT
+  CONFIG_MEDIATEK_WATCHDOG
+)
+# 静默/被 select 的派生项：不主动写，只验证真的在（写了也会被 olddefconfig 抹掉）
+ANDROID_EXPECT=(CONFIG_NF_NAT CONFIG_NF_NAT_MASQUERADE CONFIG_NF_DEFRAG_IPV4 CONFIG_NF_DEFRAG_IPV6
+  CONFIG_NETFILTER_XTABLES CONFIG_IP_NF_IPTABLES CONFIG_NF_CONNTRACK CONFIG_WATCHDOG_CORE
+  CONFIG_INET CONFIG_XFRM CONFIG_XFRM_USER)
 GATE_N=(CONFIG_ANDROID_BINDERFS CONFIG_ION CONFIG_ARM_APPENDED_DTB_NOT)
 # ARM_APPENDED_DTB 是本项目启动链的命门，必须 =y，单独校验
 MUST_Y_LIFELINE=(CONFIG_ARM_APPENDED_DTB CONFIG_MACH_MT6572 CONFIG_ARCH_MEDIATEK)
@@ -67,8 +106,11 @@ st() { # y|m|n|missing ; 符号整体不可见(依赖关闭)也报 n，由调用
 
 gate_check() {
   local bad=0 s
-  for s in "${GATE_Y[@]}" "${MUST_Y_LIFELINE[@]}"; do
+  for s in "${GATE_Y[@]}" "${MUST_Y_LIFELINE[@]}" "${ANDROID_ON[@]}"; do
     [ "$(st "$s")" = y ] || { echo "GATE-FAIL(expect y) $s=$(st "$s")"; bad=$((bad+1)); }
+  done
+  for s in "${ANDROID_EXPECT[@]}"; do
+    v=$(st "$s"); [ "$v" = y ] || echo "GATE-WARN(派生项未生效) $s=$v"
   done
   for s in "${GATE_M[@]}"; do
     [ "$(st "$s")" = m ] || { echo "GATE-FAIL(expect m) $s=$(st "$s")"; bad=$((bad+1)); }
@@ -109,6 +151,20 @@ case "${1:-apply}" in
     gate_check || { echo ">>> 回归失败；before 副本: $BAK/a9p2_${TS}/config.before_slim_${TS}"; exit 3; }
     echo "BACKUP_DIR=$BAK/a9p2_${TS}"
     ;;
+  android)
+    cd "$WT" || exit 1
+    mkdir -p "$BAK/a9p3_${TS}"
+    cp .config "$BAK/a9p3_${TS}/config.before_android_${TS}"
+    for s in "${ANDROID_ON[@]}"; do ./scripts/config --set-val "$s" y; done
+    make ARCH=arm $XCF olddefconfig >/dev/null 2>&1 || { echo "olddefconfig 失败"; exit 2; }
+    if grep -qE '^CONFIG_X86_64=' .config; then echo ">>> 架构漂移，回滚"; cp "$BAK/a9p3_${TS}/config.before_android_${TS}" .config; exit 4; fi
+    cp .config "$BAK/a9p3_${TS}/config.after_android_${TS}"
+    echo "===== diffconfig (before -> after android) ====="
+    ./scripts/diffconfig "$BAK/a9p3_${TS}/config.before_android_${TS}" .config
+    echo "===== 配置门校验(含 A9 网络必需项) ====="
+    gate_check || { echo ">>> 有符号没留住，见上面 diff；before 副本 $BAK/a9p3_${TS}"; exit 3; }
+    echo "BACKUP_DIR=$BAK/a9p3_${TS}"
+    ;;
   build)
     cd "$WT" || exit 1
     gate_check || { echo "配置门未过，拒绝编译"; exit 3; }
@@ -127,5 +183,5 @@ case "${1:-apply}" in
   check)
     cd "$WT" || exit 1; gate_check
     ;;
-  *) echo "用法: $0 [apply|build|check]"; exit 1 ;;
+  *) echo "用法: $0 [apply|android|build|check]"; exit 1 ;;
 esac

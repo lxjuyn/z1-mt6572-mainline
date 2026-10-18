@@ -1,0 +1,45 @@
+# Z1 mainline(7.0-rc7) 设备节点权限 —— 由 Pie init 在 ueventd 启动时读取。
+#
+# 为什么需要这份文件：仓里 mainline 那套 device 层(device/jiabo/z1/rootdir/)只有
+# init.z1.rc / fstab.z1 / manifest.xml，**没有 ueventd.z1.rc**；stock 3.4.67 那份
+# (stock/ueventd.z1.rc) 里全是 /dev/ion、/dev/mali 这类 mainline 上不存在的节点，
+# 而 mainline 真正需要的 hwbinder/vndbinder/dma_heap/tun/input 一个都没写。
+# 权限缺失在 permissive 首轮不会 fatal（SELinux 不拦），但 DAC 仍会拦：
+# 例如 uid=system 的 SurfaceFlinger 打不开 0600 的 /dev/fb0。
+#
+# 行格式: <路径> <mode> <owner> <group>
+# 逐项依据(内核侧事实来自 wip/a9-mainline 的 .config / 源码，可用 tools/z1/z1_a9_devcheck.sh 复核):
+#   binder/hwbinder/vndbinder  CONFIG_ANDROID_BINDER_IPC=y + ANDROID_BINDER_DEVICES 三域(驱动静态注册, 非 binderfs)
+#   ashmem                     CONFIG_ANDROID_ASHMEM=y(本仓回移 drivers/android/ashmem.c)
+#   fb0                        CONFIG_FB=y + CONFIG_FB_SIMPLE=y + chosen/framebuffer0(LK 遗留 240x320 r5g6b5)
+#   dma_heap/*                 CONFIG_DMABUF_HEAPS_{SYSTEM,CMA}=y —— ION 缺位下 gralloc/GBM 的缓冲区来源
+#   net/tun                    CONFIG_TUN=y(本轮新开) —— VpnService
+#   watchdog                   CONFIG_MEDIATEK_WATCHDOG=y(本轮新开) —— init.z1.rc 的 watchdogd
+#   input/*                    CONFIG_INPUT=y + KEYBOARD_MTK_PMIC=y(按键是 A9 唯一可用的输入面；
+#                              触摸节点仍 disabled，等板上 i2cprobe 取证，见 TOUCH_CST836U 文档)
+
+/dev/binder		0666	root	root
+/dev/hwbinder		0666	root	root
+/dev/vndbinder		0666	root	root
+/dev/ashmem		0666	root	root
+
+/dev/fb0		0660	system	graphics
+/dev/graphics/fb0	0660	system	graphics
+
+/dev/dma_heap/*		0660	system	graphics
+
+/dev/net/tun		0660	system	vpn
+
+/dev/watchdog		0600	root	root
+
+/dev/input/*		0660	root	input
+
+# 调试用 USB 串口(klog 转发口, 0e8d:2006 configfs ACM)，与 ADB 无关，A9 正式跑可留
+/dev/ttyGS0		0600	root	root
+
+# ADB 走 FunctionFS: init.z1.rc 已 mkdir /dev/usb-ffs/adb 0770 shell shell 并 mount functionfs
+/dev/usb-ffs/adb	0770	shell	shell
+/dev/usb-ffs/adb/*	0660	shell	shell
+
+# auxadc/IIO 读数(battery 取证路线)，health HAL 若改走 sysfs 则这两行不影响
+/dev/iio:device*	0660	system	system
