@@ -195,8 +195,7 @@ case "$cmd" in
 	# 前置预算闸门：必须在打包**之前**判死。实测发现 mkbootimg 在 kernel+dtb+ramdisk
 	# 超过 6MB 分区时不会报错，而是静默丢掉整个 ramdisk（镜像照样 ≤6MB、照样能解出
 	# kernel/dtb），上板表现是 VFS panic，极易被误诊成内核回归。
-	local proj
-	proj=$(( $(stat -c%s "$ZIMG") + $(stat -c%s "$DTB") + $(stat -c%s "$RD") + 4096 ))
+	proj=$((   $(stat -c%s "$ZIMG") + $(stat -c%s "$DTB") + $(stat -c%s "$RD") + 4096 ))
 	echo "投影大小(内核+dtb+ramdisk+头) = $proj B / 上限 $BOOT_LIMIT B -> 超出 $(( proj - BOOT_LIMIT )) B"
 	[ "$proj" -le "$BOOT_LIMIT" ] || { echo ">>> 超预算，拒绝打包（先按 A9_BOOT_BUDGET.md §3 腾空间，不要指望截断）"; exit 6; }
 	rm -f "$out"
