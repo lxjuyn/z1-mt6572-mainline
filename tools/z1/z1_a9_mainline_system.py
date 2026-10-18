@@ -173,6 +173,33 @@ def to_raw(image, workdir):
     return raw, True
 
 
+def policy_is_loadable(path):
+    """投进 precompiled_sepolicy 前先验内核能不能吃：magic 必须是 SELINUX_MAGIC(0x45524f53)，
+    version 必须落在内核的 [POLICYDB_VERSION_MIN, POLICYDB_VERSION_MAX] 区间。
+
+    本轮实测教训：r2 ramdisk 里那个 384 KB 的 `sepolicy` 其实是 libselinux 编译后的
+    file_contexts 二进制(magic 0xF97CFF8C, ver 8)。投进去只会被 /sys/fs/selinux/load 拒，
+    比老实报 NOPOLICY 更坏 —— 这种错必须在**出片阶段**把住，不能留给串口。
+    """
+    import struct
+    head = Path(path).read_bytes()[:8]
+    if len(head) < 8:
+        return False, '不足 8 字节'
+    magic, ver = struct.unpack('<II', head)
+    hdr = WT / 'security' / 'selinux' / 'include' / 'security.h'
+    lo = hi = None
+    if hdr.is_file():
+        defs = dict((m.group(1), int(m.group(2)))
+                    for m in re.finditer(r'#define\s+(POLICYDB_VERSION_\w+)\s+(\d+)', hdr.read_text()))
+        lo = defs.get('POLICYDB_VERSION_BASE')
+        hi = (defs.get('POLICYDB_VERSION_NEVERAUDIT') or defs.get('POLICYDB_VERSION_XPERMS_IOCTL'))
+    if magic != 0x45524F53:
+        return False, 'magic=0x%08X 不是 SELINUX_MAGIC 0x45524F53，多半不是策略镜像' % magic
+    if lo is not None and hi is not None and not (lo <= ver <= hi):
+        return False, 'version=%d 不在内核区间 %d..%d' % (ver, lo, hi)
+    return True, 'magic OK，version=%d（内核允许 %s..%s）' % (ver, lo, hi)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--system', required=True, help='A9 system.img（sparse 或 raw ext4）')
@@ -332,6 +359,13 @@ def main():
             if f.is_file():
                 srcs.append(f)          # 输入件在 bin/ 子目录里，不一起列进来就永远投不出去
         for f in sorted(srcs, key=lambda x: x.name):
+            if f.name == 'precompiled_sepolicy':
+                ok, why = policy_is_loadable(f)
+                if not ok:
+                    report['notes'].append('拒绝投 %s：%s —— 交棒时报 NOPOLICY 更安全' % (f.name, why))
+                    print('SKIP precompiled_sepolicy: %s' % why)
+                    continue
+                report['notes'].append('precompiled_sepolicy 可载入性：%s' % why)
             dests = TARGETS.get(f.name)
             if dests is None:
                 skipped.append((f.name, '本工具没有为它定义落点'))
