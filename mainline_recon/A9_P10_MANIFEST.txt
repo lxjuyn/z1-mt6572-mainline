@@ -16,3 +16,5 @@ system 侧改动：删 /lib/vndk-26(57M)+/lib/vndk-27(58M)+/framework/oat(39M)�
 包：out/A9_flashpkg_p10_gsi_preinit（boot+system+scatter 只放行 bootimg,android；9 个分区强制不下载）。
 性质：预交棒诊断包 —— 刷它拿的是分区识别/by-name/fstab/SELinux 四步的板上真值，不是安卓成品；
       补 android9/mainline/rootdir/bin/{init,ueventd} 两个 EM_ARM 二进制后重跑 adapter，闸才放行。未上板。
+
+投件自检：tools/z1/z1_a9_check_seed.sh（判 EM_ARM / second_stage 串 / PT_INTERP 不是 linker64），SEED_FAIL=0 才重跑 adapter。
