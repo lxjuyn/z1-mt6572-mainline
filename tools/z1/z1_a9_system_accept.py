@@ -272,6 +272,72 @@ def main():
             else:
                 v.ok('dev_layer', 'mainline device 层已投递')
 
+            # 模块投递闸：rc 里每一条 insmod 的绝对路径，必须在镜像里真找得到、且是 EM_ARM
+            # 的 ELF 模块。只看"清单里有 .ko"不算数 —— P11 就是 modules.json 齐全但镜像里
+            # 连 /lib/modules 都不存在，netd 到运行期才发现规则下发不了。
+            ins = []
+            for p in allfiles:
+                if not p.endswith('.rc'):
+                    continue
+                try:
+                    t = dbg(raw, 'cat %s' % p).decode(errors='replace')
+                except Exception:
+                    continue
+                for mm in re.finditer(r'(?m)^\s*insmod\s+(\S+\.ko)', t):
+                    ins.append((p, mm.group(1)))
+            if not ins:
+                v.warn('net_modules', '镜像里没有任何 insmod 行（若 netfilter 全内建则正常）')
+            else:
+                bad = []
+                for rcp, target in ins:
+                    rel = target[len('/system'):] if target.startswith('/system/') else target
+                    cand = next((probe for probe in (rel, target) if exists(raw, probe)), None)
+                    if cand is None:
+                        bad.append('%s 要 insmod %s，镜像内 %s 两处都没有'
+                                   % (os.path.basename(rcp), target, ' / '.join((rel, target))))
+                        continue
+                    try:
+                        head = dbg(raw, 'cat %s' % cand)[:64]
+                    except Exception as e:
+                        bad.append('%s 读不出内容: %s' % (cand, str(e)[:60]))
+                        continue
+                    em = elf_machine(head)
+                    if head[:4] != b'\x7fELF' or em != EM_ARM:
+                        bad.append('%s 不是 EM_ARM 内核模块(magic=%r e_machine=%s)'
+                                   % (cand, head[:4], em))
+                if bad:
+                    v.fail('net_modules', '; '.join(bad)[:400])
+                else:
+                    v.ok('net_modules', 'rc 里 %d 条 insmod 全部命中，均为 EM_ARM 模块' % len(ins))
+
+            # 类型位闸：adapter 用 debugfs 原地写文件，而 set_inode_field 喂错进制就会把
+            # i_mode 覆盖成不含 S_IFREG 的值 —— 权限位看着完全正确、debugfs cat 也读得出字节，
+            # 但内核根本打不开这个文件。P10/P11 投递的 10 个文件全中招且当时没有任何一道闸能看见。
+            DELIVERED = {'init.z1.rc', 'ueventd.z1.rc', 'fstab.z1', 'z1_network.rc',
+                         'z1_usb_setup.sh', 'z1_device_manifest.xml',
+                         'xt_quota2.ko', 'xt_IDLETIMER.ko', 'init', 'ueventd'}
+            lost, checked = [], 0
+            for p in allfiles:
+                b = os.path.basename(p)
+                if b not in DELIVERED:
+                    continue
+                # init/ueventd 只看 /bin 下那两个（/etc/init 是目录，按名字抓会误报）
+                if b in ('init', 'ueventd') and '/bin' not in p:
+                    continue
+                checked += 1
+                try:
+                    st = dbg(raw, 'stat %s' % p).decode(errors='replace')
+                except Exception:
+                    continue
+                mm = re.search(r'(?m)^Inode:\s+\d+\s+Type:\s+(\S+)', st)
+                if not mm or mm.group(1) != 'regular':
+                    lost.append('%s(Type=%s)' % (p, mm.group(1) if mm else '读不到'))
+            if lost:
+                v.fail('file_type', '%d 个投递件类型位丢失(内核打不开): %s'
+                       % (len(lost), ', '.join(lost[:8])))
+            else:
+                v.ok('file_type', '投递的 %d 个文件 i_mode 类型位均为 regular' % checked)
+
         r = subprocess.run(['e2fsck', '-fn', str(raw)], capture_output=True, text=True, timeout=300)
         out = (r.stdout + r.stderr)
         report['e2fsck_rc'] = r.returncode
@@ -281,7 +347,7 @@ def main():
             # 原厂镜像常用非 e2fsprogs 的打包器生成，"位图末尾填充未设置"这类纯记账瑕疵
             # 会带 rc=4，但不会让 A9 起不来；把它和真正的结构损坏混成一类会误拒好镜像。
             hard = re.findall(r'(?i)(corrupt|inconsistent|missing|illegal|not connected|'
-                              r'BLOCK GROUP|superblock|directory unknown)', out)
+                              r'BLOCK GROUP|superblock|directory unknown|i_blocks)', out)
             found = [ln.strip() for ln in out.splitlines()
                      if ('修复' in ln or 'Fix' in ln or ':' in ln) and ln.strip()
                      and '警告' not in ln and '遍' not in ln]

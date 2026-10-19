@@ -132,6 +132,7 @@ def main():
 
         # L3 语义红线
         stockish, binderfs, ionrefs = [], [], []
+        toolish = []
         for k, p in files.items():
             try:
                 if os.path.getsize(p) > 8 << 20:
@@ -140,7 +141,10 @@ def main():
             except OSError:
                 continue
             if b'/z1_stock_kernel' in data or b'ro.z1.stock_kernel' in data:
-                stockish.append(k)
+                # sbin/ 下是本机自己的交棒/取证工具，它们提到这个标记恰恰是在说明"已撤销"
+                # （P9 实测：全 ramdisk 唯一命中是 sbin/z1_a9_handoff.sh 的注释与 DIAG 文案）。
+                # 真正的残留门控只会落在 /init 与 rc 里，所以仍逐项扫，但只对非 sbin 命中判死。
+                (toolish if k.startswith('sbin/') else stockish).append(k)
             if b'binderfs' in data and re.search(rb'mount\s+binderfs', data):
                 binderfs.append(k)
             if re.search(rb'/dev/ion\b', data) and not k.startswith('sbin/'):
@@ -151,6 +155,9 @@ def main():
             bad.append('rc 里有 `mount binderfs`，但本内核 ANDROID_BINDERFS=n: %s' % ', '.join(binderfs[:5]))
         if ionrefs:
             warn.append('引用了 mainline 上不存在的 /dev/ion: %s' % ', '.join(ionrefs[:5]))
+        if toolish:
+            warn.append('stock 标记串只在 sbin/ 交棒工具里出现（是撤销逻辑的文案，不是门控本体）: %s'
+                        % ', '.join(toolish[:5]))
 
         for w in warn:
             print('WARN: %s' % w)

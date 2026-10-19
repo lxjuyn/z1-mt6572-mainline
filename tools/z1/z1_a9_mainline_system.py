@@ -84,12 +84,32 @@ def image_write(image, hostfile, dest, mode='0644'):
         cwd = target
     dbg_script(image, ['cd %s' % cwd, 'write %s %s' % (hostfile, name)])
     dbg_script(image, img_mode(image, dest, mode))
+    assert_regular(image, dest)
     return dbg(image, 'cat %s' % dest)
 
 
 def img_mode(image, dest, mode):
-    """set_inode_field 的 mode 要写成八进制数(不带前导 0 也行)，且必须用绝对路径。"""
-    return ['set_inode_field %s mode %s' % (dest, mode)]
+    """给 set_inode_field 生成 mode 参数：**必须带文件类型位、且写成前导 0 的八进制字面量**。
+
+    debugfs 用 strtoul(base 0) 解析这个值，两个坑都在这踩过：
+      * 喂 '0755' 得到八进制 493，i_mode 被**整个覆盖**成不含 S_IFREG 的值 —— inode 变
+        `Type: bad type`，权限看着对但内核根本打不开这个文件（P10/P11 投递的 10 个文件
+        全中招，e2fsck 那句"i_blocks 应为 0"就是它的旁证，却被当成记账瑕疵放过）。
+      * 喂 '100755' 被按**十进制** 100755 解析 > 65535 而直接拒绝，错误只在 stdout，
+        **退出码仍是 0** —— 于是"补可执行位"那步静默空转了一整轮。
+    所以这里统一算成 0o100000|perm 并写成 '0100xxx'，由 assert_regular() 回读断言。
+    """
+    perm = int(str(mode), 8) & 0o7777
+    return ['set_inode_field %s mode 0%o' % (dest, 0o100000 | perm)]
+
+
+def assert_regular(image, dest):
+    """回读 i_mode 的类型位。debugfs 报错不改退出码，所以必须解析文本。"""
+    st = dbg(image, 'stat %s' % dest).decode(errors='replace')
+    m = re.search(r'(?m)^Inode:\s+\d+\s+Type:\s+(\S+)', st)
+    if not m or m.group(1) != 'regular':
+        raise RuntimeError('%s 的类型位丢了（Type=%s），内核无法打开' % (dest, m.group(1) if m else '读不到'))
+    return st
 
 
 def exists(image, path):
@@ -409,7 +429,10 @@ def main():
             exe = f.name.endswith('.sh') or f.name in ('init', 'ueventd') or '/bin/' in ''.join(dests)
             for d in dests:
                 if '/bin/' in d or exe:
-                    dbg(img, 'set_inode_field %s mode 100755' % d, write=True)
+                    # 旧写法 'mode 100755' 被 debugfs 当十进制拒绝且退出码仍为 0，静默空转；
+                    # 现在与 image_write 同路：带类型位八进制 + 回读断言。
+                    dbg_script(img, img_mode(img, d, '0755'))
+                    assert_regular(img, d)
         report['placed'] = placed
         report['skipped_src'] = skipped
         print('已投递 mainline device 层：源文件 %d 份 -> 落点 %d 处（system 前缀=%s，vendor=%s）'
@@ -418,6 +441,52 @@ def main():
             report['notes'].append('未定义落点的源文件: %s' % skipped)
         report['notes'].append('A9 具体扫描的 rc/ueventd/manifest 路径本机无法离线确认，'
                                '故同一文件放了多个候选落点，且都用 .z1 后缀不覆盖 AOSP 原件')
+
+        # --- 3b) 交付 A9 要 insmod 的内核模块 ---
+        # init.z1.network.rc 写的是绝对路径 /system/lib/modules/z1-network/*.ko；本分区挂到
+        # /system 时它就是镜像里的 <P>/lib/modules/z1-network/*.ko。投不到，netd 下发
+        # quota/IDLETIMER 规则会静默失败（P11 就是清单齐全但镜像里连 /lib/modules 都没有）。
+        # 清单带 sha256 强校验，绝不沿用 stock 3.4.67 时代的字节。
+        MJ = WT / 'android9' / 'mainline' / 'network' / 'modules.json'
+        if MJ.is_file():
+            meta = json.loads(MJ.read_text())
+            placed_mod, bad_mod = [], []
+            for m in meta.get('modules', []):
+                ko = WT / m['source']
+                if not ko.is_file():
+                    bad_mod.append('%s: 树里没有 %s（该符号没编成模块）' % (m['name'], m['source']))
+                    continue
+                blob = ko.read_bytes()
+                got = sha(blob)
+                if got != m['sha256']:
+                    bad_mod.append('%s: 产物 sha=%s 与清单 sha=%s 不符，先跑 z1_a9_stage_modules.py 重算'
+                                   % (m['name'], got[:12], m['sha256'][:12]))
+                    continue
+                dest = P + '/lib/modules/z1-network/' + m['file']
+                entry = {'op': 'install_module', 'path': dest, 'src': m['source'], 'sha256': got,
+                        'size': len(blob), 'kernelrelease': meta.get('kernelrelease', '')}
+                if a.dry_run:
+                    entry['dry_run'] = True
+                    report['actions'].append(entry)
+                    placed_mod.append(dest)
+                    continue
+                back = image_write(img, ko, dest, mode='0644')
+                if sha(back) != got:
+                    print('ABORT: 模块 %s 读回 sha 不一致（期望 %s 实得 %s）'
+                          % (dest, got[:12], sha(back)[:12]))
+                    return 3
+                entry['verified'] = 'readback_ok'
+                report['actions'].append(entry)
+                placed_mod.append(dest)
+            report['placed_modules'] = placed_mod
+            if bad_mod:
+                report['notes'].append('模块投递未完成: %s' % bad_mod)
+                print('ABORT: 内核模块投递失败 -> %s' % bad_mod)
+                return 3
+            print('已投递内核模块 %d 个 -> %s' % (len(placed_mod), P + '/lib/modules/z1-network/'))
+        else:
+            report['notes'].append('没有 %s，跳过模块投递（rc 里的 insmod 会失败）'
+                                   % MJ.relative_to(WT))
 
         # --- 4) 属性残留检查 ---
         props = [k for k in allfiles if k.endswith('build.prop') or k.endswith('default.prop')]
