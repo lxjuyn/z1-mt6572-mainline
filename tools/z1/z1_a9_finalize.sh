@@ -36,6 +36,14 @@ mkdir -p "$DIR"
 step() { echo; echo "########## $* ##########"; }
 abort() { echo; echo ">>> 停在第 $1 步: $2"; exit 3; }
 
+step "0/4 设备层每条假设对内核事实核账（快跑；不接进链的话就得靠人记得手动跑）"
+# 本轮实测：这条链原先只在人脑里"记得跑"，devcheck 的 FAIL(rootdir/.gitignore 被 COPY 引用)
+# 就是这样被绕过一次出片的。判据不过就别烧后面三步。
+bash "$SELF/z1_a9_devcheck.sh" >"$DIR/step0_devcheck.log" 2>&1
+rc=$?
+tail -4 "$DIR/step0_devcheck.log"
+[ $rc -eq 0 ] || abort 0 "DEVCHAIN 未过，见 $DIR/step0_devcheck.log"
+
 step "1/4 ramdisk 内容级验收"
 python3 "$SELF/z1_a9_ramdisk_accept.py" "$RD" 2>&1 | tee "$DIR/step1_accept.log"
 grep -q "RAMDISK_ACCEPT=ACCEPT" "$DIR/step1_accept.log" || abort 1 "ramdisk 验收未过，见 $DIR/step1_accept.log"

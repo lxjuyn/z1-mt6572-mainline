@@ -25,6 +25,12 @@ echo "SHA256=OK $got"
 [ -f "$BOOT" ] || { echo "ERR: 找不到 boot $BOOT"; exit 1; }
 
 step() { echo; echo "########## $* ##########"; }
+step "0/3 设备层每条假设对内核事实核账（与 finalize 同一道闸，别因为走这条线就绕过它）"
+if ! bash "$SELF/z1_a9_devcheck.sh" >"$ROOT/out/a9sys_r2.devcheck.log" 2>&1; then
+  tail -4 "$ROOT/out/a9sys_r2.devcheck.log"
+  echo "FAIL: DEVCHAIN 未过，见 $ROOT/out/a9sys_r2.devcheck.log"; exit 3
+fi
+echo "DEVCHAIN=OK"
 step "1/3 内容级验收（未改造）"
 python3 "$SELF/z1_a9_system_accept.py" "$IMG" --json "$DIR.accept.json" 2>&1 | tail -6
 step "2/3 撤 stock 门控 + 投本仓 device 层（含 init/ueventd 投件，若这份 system 自己带就跳过）"
