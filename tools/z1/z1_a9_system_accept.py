@@ -20,7 +20,7 @@ from pathlib import Path
 
 SELF = Path(__file__).resolve().parent
 sys.path.insert(0, str(SELF))
-from z1_a9_mainline_system import (ANDROID_PART_LIMIT, dbg, exists, sha, to_raw, walk)  # noqa: E402
+from z1_a9_mainline_system import (ANDROID_PART_LIMIT, WT, dbg, exists, sha, to_raw, walk)  # noqa: E402
 
 EM_ARM, EM_AARCH64 = 40, 183
 SPARSE_MAGIC = 0x3AFF26AF
@@ -289,6 +289,11 @@ def main():
                 v.warn('net_modules', '镜像里没有任何 insmod 行（若 netfilter 全内建则正常）')
             else:
                 bad = []
+                want = {}
+                mjp = WT / 'android9' / 'mainline' / 'network' / 'modules.json'
+                if mjp.is_file():
+                    for mm in json.loads(mjp.read_text()).get('modules', []):
+                        want[mm['file']] = mm['sha256']
                 for rcp, target in ins:
                     rel = target[len('/system'):] if target.startswith('/system/') else target
                     cand = next((probe for probe in (rel, target) if exists(raw, probe)), None)
@@ -297,14 +302,21 @@ def main():
                                    % (os.path.basename(rcp), target, ' / '.join((rel, target))))
                         continue
                     try:
-                        head = dbg(raw, 'cat %s' % cand)[:64]
+                        blob = dbg(raw, 'cat %s' % cand)
                     except Exception as e:
                         bad.append('%s 读不出内容: %s' % (cand, str(e)[:60]))
                         continue
-                    em = elf_machine(head)
+                    head, em = blob[:64], elf_machine(blob[:64])
                     if head[:4] != b'\x7fELF' or em != EM_ARM:
                         bad.append('%s 不是 EM_ARM 内核模块(magic=%r e_machine=%s)'
                                    % (cand, head[:4], em))
+                        continue
+                    # 只验 ELF 会放过"载荷自带的那份旧 .ko"：它 magic 与 e_machine 全对，
+                    # 但 vermagic 不是本轮 7.0.0-rc7-z1+，板上 insmod 一样被拒（r2 实测如此）。
+                    exp = want.get(os.path.basename(cand))
+                    if exp and sha(blob) != exp:
+                        bad.append('%s sha=%s 与本轮清单 %s 不符（是载荷自带的旧 .ko，vermagic 对不上本内核）'
+                                   % (cand, sha(blob)[:12], exp[:12]))
                 if bad:
                     v.fail('net_modules', '; '.join(bad)[:400])
                 else:

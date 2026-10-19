@@ -472,6 +472,15 @@ def main():
                     report['actions'].append(entry)
                     placed_mod.append(dest)
                     continue
+                # 已存在就必须先 rm：debugfs 的 write 撞已存在路径是**静默失败、退出码仍为 0**，
+                # 于是读回的是旧件而 sha 必然不符（r2 那份 system 自带这两个 .ko，实测
+                # xt_quota2=c6ac4c1a…/xt_IDLETIMER=1887b5dd…，与本机 7.0.0-rc7-z1+ 产物不同）。
+                # 模块与 rc/fstab 同侧：vermagic 必须对上本轮内核，所以这里**坚持覆盖**，
+                # 不像 init/ueventd 那种 ELF 副本可以让位给原件。
+                if exists(img, dest):
+                    before = dbg(img, 'cat %s' % dest)
+                    entry['overwrote'] = {'sha256_before': sha(before), 'bytes_before': len(before)}
+                    dbg(img, 'rm %s' % dest, write=True)
                 back = image_write(img, ko, dest, mode='0644')
                 if sha(back) != got:
                     print('ABORT: 模块 %s 读回 sha 不一致（期望 %s 实得 %s）'

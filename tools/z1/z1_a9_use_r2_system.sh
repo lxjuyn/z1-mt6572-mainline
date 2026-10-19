@@ -29,11 +29,21 @@ step "1/3 内容级验收（未改造）"
 python3 "$SELF/z1_a9_system_accept.py" "$IMG" --json "$DIR.accept.json" 2>&1 | tail -6
 step "2/3 撤 stock 门控 + 投本仓 device 层（含 init/ueventd 投件，若这份 system 自己带就跳过）"
 rm -rf "$ROOT/out/a9sys_r2"
-python3 "$SELF/z1_a9_mainline_system.py" --system "$IMG" --out "$ROOT/out/a9sys_r2" 2>&1 | tail -5
+# 上一版把 adapter 直接管进 tail，**退出码被管道吃掉**：adapter 在模块那步 ABORT(rc=3)
+# 之后，半改造的镜像照样进了包还拿到 SYS_ACCEPT=ACCEPT。装包链上每一步的 rc 都必须自己接。
+python3 "$SELF/z1_a9_mainline_system.py" --system "$IMG" --out "$ROOT/out/a9sys_r2" \
+  > "$ROOT/out/a9sys_r2.adapter.log" 2>&1
+rc=$?
+tail -5 "$ROOT/out/a9sys_r2.adapter.log"
+[ $rc -eq 0 ] || { echo "FAIL: adapter rc=$rc —— 半改造镜像不得进装包链，见 $ROOT/out/a9sys_r2.adapter.log"; exit 3; }
 SYS="$ROOT/out/a9sys_r2/system_mainline.img"
 [ -f "$SYS" ] || { echo "FAIL: 改造产物没落盘"; exit 3; }
 step "3/3 装包 + 独立复核"
-bash "$SELF/z1_a9_flashpkg.sh" --boot "$BOOT" --system "$SYS" --dir "$DIR" 2>&1 | grep -E 'SYS_ACCEPT|system 验收|放行|PACKAGE='
+bash "$SELF/z1_a9_flashpkg.sh" --boot "$BOOT" --system "$SYS" --dir "$DIR" 2>&1 \
+  | tee "$ROOT/out/a9sys_r2.pkg.log" | grep -E 'SYS_ACCEPT|system 验收|放行|PACKAGE='
+rc=$?
+[ $rc -eq 0 ] || { echo "FAIL: flashpkg rc=$rc —— 预检没过，包不可刷"; exit 3; }
+grep -q 'SYS_ACCEPT=ACCEPT' "$ROOT/out/a9sys_r2.pkg.log" || { echo "FAIL: 装包里的 system 验收不是 ACCEPT"; exit 3; }
 python3 - "$DIR" "$IMG" <<'PY'
 import hashlib, subprocess, re, sys, os
 d = sys.argv[1]
