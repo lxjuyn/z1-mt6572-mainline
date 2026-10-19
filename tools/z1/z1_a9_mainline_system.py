@@ -373,7 +373,9 @@ def main():
                 report['notes'].append('缺输入件 %s（A-only GSI 不提供 A9 的 PID1，'
                                        '补上后本机就能把 system 改成自足版）' % f.relative_to(WT))
         placed, skipped = [], []
-        srcs = [x for x in MAINLINE_ROOTDIR.iterdir() if x.is_file()]
+        # 点开头的是版本库卫生文件（.gitignore），不是设备载荷；列进来只会在报告里挂一条
+        # "未定义落点"的假噪音，掩掉真缺件。
+        srcs = [x for x in MAINLINE_ROOTDIR.iterdir() if x.is_file() and not x.name.startswith('.')]
         for nm in ('init', 'ueventd'):
             f = SEED / nm
             if f.is_file():

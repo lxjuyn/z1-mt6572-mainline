@@ -116,6 +116,9 @@ def main():
         if f == 'manifest.xml':
             # 由 DEVICE_MANIFEST_FILE 消费，不要求 COPY 规则
             continue
+        if f == '.gitignore':
+            # 版本库卫生文件，本来就不该被 COPY 进镜像；当载荷要求它只会掩掉真错位
+            continue
         referenced = re.search(re.escape(f), src) is not None
         report(bool(referenced), 'rootdir/%s 被 COPY 引用' % f,
                '' if referenced else '文件写了但没装进镜像 = 白写')
