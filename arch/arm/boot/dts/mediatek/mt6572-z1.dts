@@ -310,6 +310,28 @@
 			      <&mt6323_adc MT6323_AUXADC_BAT_TEMP>;
 		io-channel-names = "voltage", "temperature";
 		monitored-battery = <&battery_data>;
+		/*
+		 * Generic Li-ion open-circuit discharge curve (uV, %),
+		 * voltage descending. TBC against the real Z1 pack; adjust
+		 * after first on-device voltage/percentage comparison.
+		 */
+		voltage-capacity-table = <
+			4200000 100
+			4150000 95
+			4100000 89
+			4050000 83
+			4000000 77
+			3950000 70
+			3900000 62
+			3850000 53
+			3800000 43
+			3750000 33
+			3700000 23
+			3650000 13
+			3600000 6
+			3450000 2
+			3300000 0
+		>;
 		status = "okay";
 	};
 

@@ -48,6 +48,12 @@ struct gab {
 	struct delayed_work bat_work;
 	int status;
 	struct gpio_desc *charge_finished;
+	/* Z1 extension: voltage(uV) -> capacity(%) lookup from DT */
+	u32 *cap_volt;		/* voltage descending */
+	u32 *cap_pct;		/* capacity ascending */
+	int cap_n;
+	int last_capacity;	/* -1 unknown */
+	bool has_capacity;
 };
 
 static struct gab *to_generic_bat(struct power_supply *psy)
@@ -98,10 +104,52 @@ static int gab_read_channel(struct gab *adc_bat, enum gab_chan_type channel,
 	return ret;
 }
 
+/*
+ * Z1 extension: capacity from a DT-supplied voltage->percent table.
+ * Table given as pairs in DT:
+ *   voltage-capacity-table = <v0 p0 v1 p1 ...>;  // v in uV, descending
+ * Linear interpolation between points; clamped outside the range.
+ */
+static int gab_capacity_lookup(struct gab *adc_bat, int voltage_uv, int *pct)
+{
+	int i;
+
+	if (!adc_bat->cap_n)
+		return -ENODATA;
+	/* below the lowest (most discharged) entry */
+	if (voltage_uv <= adc_bat->cap_volt[adc_bat->cap_n - 1]) {
+		*pct = adc_bat->cap_pct[adc_bat->cap_n - 1];
+		return 0;
+	}
+	if (voltage_uv >= adc_bat->cap_volt[0]) {
+		*pct = adc_bat->cap_pct[0];
+		return 0;
+	}
+	for (i = 0; i < adc_bat->cap_n - 1; i++) {
+		int v_hi = adc_bat->cap_volt[i];
+		int v_lo = adc_bat->cap_volt[i + 1];
+
+		if (voltage_uv <= v_hi && voltage_uv >= v_lo) {
+			int p_hi = adc_bat->cap_pct[i];
+			int p_lo = adc_bat->cap_pct[i + 1];
+
+			if (v_hi == v_lo)
+				*pct = p_hi;
+			else
+				*pct = p_lo + (voltage_uv - v_lo) * (p_hi - p_lo)
+					/ (v_hi - v_lo);
+			return 0;
+		}
+	}
+	*pct = 50;
+	return 0;
+}
+
 static int gab_get_property(struct power_supply *psy,
 		enum power_supply_property psp, union power_supply_propval *val)
 {
 	struct gab *adc_bat = to_generic_bat(psy);
+	int ret;
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
@@ -115,6 +163,21 @@ static int gab_get_property(struct power_supply *psy,
 		return gab_read_channel(adc_bat, GAB_POWER, &val->intval);
 	case POWER_SUPPLY_PROP_TEMP:
 		return gab_read_channel(adc_bat, GAB_TEMP, &val->intval);
+	case POWER_SUPPLY_PROP_CAPACITY: {
+		int voltage_uv, pct;
+
+		if (!adc_bat->has_capacity)
+			return -ENODATA;
+		ret = gab_read_channel(adc_bat, GAB_VOLTAGE, &voltage_uv);
+		if (ret < 0)
+			return ret;
+		ret = gab_capacity_lookup(adc_bat, voltage_uv, &pct);
+		if (ret < 0)
+			return ret;
+		/* STATUS_FULL only when the table says so (top of range) */
+		val->intval = pct;
+		return 0;
+	}
 	default:
 		return -EINVAL;
 	}
@@ -183,7 +246,7 @@ static int gab_probe(struct platform_device *pdev)
 	 */
 	properties = devm_kcalloc(&pdev->dev,
 				  ARRAY_SIZE(gab_props) +
-				  ARRAY_SIZE(gab_chan_name),
+				  ARRAY_SIZE(gab_chan_name) + 1,
 				  sizeof(*properties),
 				  GFP_KERNEL);
 	if (!properties)
@@ -219,6 +282,51 @@ static int gab_probe(struct platform_device *pdev)
 	/* none of the channels are supported so let's bail out */
 	if (!any)
 		return dev_err_probe(&pdev->dev, -ENODEV, "Failed to get any ADC channel\n");
+
+	/*
+	 * Z1 extension: optional voltage-capacity-table from DT.
+	 * Pairs of (microvolts, percent), voltage descending, e.g.
+	 *   voltage-capacity-table = <4200000 100 4000000 80 ... 3300000 0>;
+	 */
+	{
+		struct device_node *np = pdev->dev.of_node;
+		int n = of_property_count_u32_elems(np, "voltage-capacity-table");
+
+		if (n > 0 && !(n & 1) && n / 2 <= 32) {
+			int pairs = n / 2;
+			u32 *buf = devm_kcalloc(&pdev->dev, n, sizeof(*buf), GFP_KERNEL);
+			u32 *vv, *pp;
+			int i, descending = 1;
+
+			if (!buf)
+				return -ENOMEM;
+			if (of_property_read_u32_array(np, "voltage-capacity-table", buf, n)) {
+				devm_kfree(&pdev->dev, buf);
+			} else {
+				vv = devm_kcalloc(&pdev->dev, pairs, sizeof(*vv), GFP_KERNEL);
+				pp = devm_kcalloc(&pdev->dev, pairs, sizeof(*pp), GFP_KERNEL);
+				if (!vv || !pp)
+					return -ENOMEM;
+				for (i = 0; i < pairs; i++) {
+					vv[i] = buf[2 * i];
+					pp[i] = buf[2 * i + 1];
+				}
+				for (i = 1; i < pairs; i++) {
+					if (vv[i] >= vv[i - 1])
+						descending = 0;
+				}
+				if (descending && pp[0] <= 100 && pp[pairs - 1] <= 100) {
+					adc_bat->cap_volt = vv;
+					adc_bat->cap_pct = pp;
+					adc_bat->cap_n = pairs;
+					adc_bat->has_capacity = true;
+					properties[index++] = POWER_SUPPLY_PROP_CAPACITY;
+				} else {
+					dev_warn(&pdev->dev, "voltage-capacity-table malformed, ignoring\n");
+				}
+			}
+		}
+	}
 
 	/*
 	 * Total number of properties is equal to static properties
