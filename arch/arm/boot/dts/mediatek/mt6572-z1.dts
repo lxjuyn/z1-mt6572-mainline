@@ -462,6 +462,21 @@
 		};
 	};
 
+	kpd_pins: kpd-pins {
+		pins {
+			pinmux = <MT6572_PIN_107_KCOL0__FUNC_KCOL0>,
+				 <MT6572_PIN_108_KCOL1__FUNC_KCOL1>,
+				 <MT6572_PIN_109_KCOL2__FUNC_KCOL2>,
+				 <MT6572_PIN_110_KROW0__FUNC_KROW0>,
+				 <MT6572_PIN_111_KROW1__FUNC_KROW1>,
+				 <MT6572_PIN_112_KROW2__FUNC_KROW2>,
+				 <MT6572_PIN_142_BPI_BUS12__FUNC_KROW3>,
+				 <MT6572_PIN_143_BPI_BUS13__FUNC_KROW4>;
+			input-enable;
+			bias-pull-up;
+		};
+	};
+
 	mmc0_pins: mmc0-pins {
 
 		pins-clk {
@@ -495,13 +510,25 @@
 
 &keyboard {
 	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&kpd_pins>;
 	/* Z1 keypad matrix fixed at 8 rows x 9 cols (72-slot table) */
 	keypad,num-rows = <8>;
 	keypad,num-columns = <9>;
 	debounce-delay-ms = <32>;
 	linux,keymap = <
-		MATRIX_KEY(0, 0, KEY_VOLUMEUP)
-		MATRIX_KEY(1, 0, KEY_VOLUMEDOWN)
+		MATRIX_KEY(0, 0, KEY_VOLUMEDOWN)	/* idx0: 114 */
+		MATRIX_KEY(0, 1, KEY_PREVIOUS)		/* idx1: 251 */
+		MATRIX_KEY(0, 2, KEY_NEXT)		/* idx2: 250 */
+		MATRIX_KEY(1, 0, KEY_VOLUMEUP)		/* idx9: 115 */
+		MATRIX_KEY(1, 1, KEY_PLAYPAUSE)		/* idx10: 252 */
+		MATRIX_KEY(2, 0, KEY_STOP)		/* idx18: 106 */
+		MATRIX_KEY(2, 1, KEY_MENU)		/* idx19: 232 */
+		MATRIX_KEY(2, 2, KEY_RECORD)		/* idx20: 105 */
+		MATRIX_KEY(3, 1, KEY_UP)		/* idx28: 103 */
+		MATRIX_KEY(4, 0, KEY_BACK)		/* idx36: 158 */
+		MATRIX_KEY(4, 1, KEY_DOWN)		/* idx37: 108 */
+		MATRIX_KEY(4, 2, KEY_ENTER)		/* idx38: 254 */
 	>;
 };
 
