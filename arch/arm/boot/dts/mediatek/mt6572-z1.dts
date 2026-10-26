@@ -64,7 +64,7 @@
 		 * channel for S6 which has no UART testpoints.
 		 */
 		linux,initrd-start = <0x84100000>;
-		linux,initrd-end = <0x84235d32>;
+		linux,initrd-end = <0x842e10a9>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
