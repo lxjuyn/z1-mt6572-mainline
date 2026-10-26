@@ -34,7 +34,7 @@
 		 * console= wins /dev/console, so ttyS0 last gives the serial
 		 * port both the kernel log tail and the final console getty.
 		 */
-		bootargs = "console=tty0 console=ttyS0,921600n8 root=/dev/ram panic=10 loglevel=7 clk_ignore_unused regulator_ignore_unused oops=panic sysrq_always_enabled rdinit=/init earlycon=mtk8250,0x11005000";
+		bootargs = "console=ttyS0,921600n8 root=/dev/ram panic=10 loglevel=7 clk_ignore_unused regulator_ignore_unused oops=panic sysrq_always_enabled rdinit=/init earlycon=mtk8250,0x11005000 androidboot.hardware=z1 androidboot.selinux=permissive firmware_class.path=/system/etc/firmware printk.devkmsg=on";
 		/*
 		 * Z1 LK relocates the MTK ROOTFS payload to 0x84100000.  Its
 		 * ATAG_INITRD2 handoff is not present at runtime, so provide the
@@ -243,7 +243,7 @@
 		clocks = <&topckgen CLK_TOP_AUDIO>,
 			 <&topckgen CLK_TOP_AUDIO_INTBUS_SEL>;
 		clock-names = "audio", "audio_intbus_sel";
-		interrupts = <GIC_SPI 0 IRQ_TYPE_LEVEL_HIGH>; /* TODO: real MT6572 ASYS/AFE IRQ */
+		interrupts = <GIC_SPI 64 IRQ_TYPE_LEVEL_LOW>; /* vendor AudDrv IRQ (MT_AFE_IRQ_MCU_ID=GIC_SPI 64) */
 		status = "okay";
 	};
 
@@ -261,7 +261,8 @@
 	 * cleanly but no card is instantiated.
 	 */
 	sound: sound {
-		compatible = "mediatek,mt6572-sound";
+		compatible = "mediatek,mt6572-mt6323-sound";
+		audio-routing = "Speaker", "Speaker", "Earpiece", "Earpiece";
 		mediatek,platform = <&audsys>;
 		mediatek,audio-codec = <&codec>;
 		status = "okay";
@@ -287,7 +288,14 @@
 	 * MEDIATEK_MT6323_AUXADC there are no IIO channels for adc-battery
 	 * to consume, so leave this disabled until those three are on.
 	 */
-	battery: battery {
+	/*
+	 * battery_data (simple-battery): static pack characteristics.
+	 * Named "battery_data" so the ADC-backed meter can own the node
+	 * name "battery" — Android's health HAL looks up
+	 * /sys/class/power_supply/battery/, and generic-adc-battery names
+	 * its supply after the DT node (psy_desc->name = dev_name).
+	 */
+	battery_data: battery_data {
 		compatible = "simple-battery";
 		charge-full-design-microamp-hours = <2000000>; /* TBC: Z1 pack */
 		voltage-max-design-microvolt = <4200000>;
@@ -295,12 +303,13 @@
 		status = "okay";
 	};
 
-	adc_battery: adc-battery {
+	/* The meter owns the "battery" name for the Android health HAL. */
+	adc_battery: battery {
 		compatible = "adc-battery";
 		io-channels = <&mt6323_adc MT6323_AUXADC_BATSNS>,
 			      <&mt6323_adc MT6323_AUXADC_BAT_TEMP>;
 		io-channel-names = "voltage", "temperature";
-		monitored-battery = <&battery>;
+		monitored-battery = <&battery_data>;
 		status = "okay";
 	};
 
@@ -518,17 +527,17 @@
 	debounce-delay-ms = <32>;
 	linux,keymap = <
 		MATRIX_KEY(0, 0, KEY_VOLUMEDOWN)	/* idx0: 114 */
-		MATRIX_KEY(0, 1, KEY_PREVIOUS)		/* idx1: 251 */
-		MATRIX_KEY(0, 2, KEY_NEXT)		/* idx2: 250 */
+		MATRIX_KEY(0, 1, 251)		/* idx1: 251 */
+		MATRIX_KEY(0, 2, 250)		/* idx2: 250 */
 		MATRIX_KEY(1, 0, KEY_VOLUMEUP)		/* idx9: 115 */
-		MATRIX_KEY(1, 1, KEY_PLAYPAUSE)		/* idx10: 252 */
-		MATRIX_KEY(2, 0, KEY_STOP)		/* idx18: 106 */
-		MATRIX_KEY(2, 1, KEY_MENU)		/* idx19: 232 */
-		MATRIX_KEY(2, 2, KEY_RECORD)		/* idx20: 105 */
+		MATRIX_KEY(1, 1, 252)		/* idx10: 252 */
+		MATRIX_KEY(2, 0, 106)		/* idx18: 106 */
+		MATRIX_KEY(2, 1, 232)		/* idx19: 232 */
+		MATRIX_KEY(2, 2, 105)		/* idx20: 105 */
 		MATRIX_KEY(3, 1, KEY_UP)		/* idx28: 103 */
 		MATRIX_KEY(4, 0, KEY_BACK)		/* idx36: 158 */
 		MATRIX_KEY(4, 1, KEY_DOWN)		/* idx37: 108 */
-		MATRIX_KEY(4, 2, KEY_ENTER)		/* idx38: 254 */
+		MATRIX_KEY(4, 2, 254)		/* idx38: 254 */
 	>;
 };
 
@@ -607,5 +616,23 @@
 		compatible = "sitronix,st7785m";
 		reg = <0>;
 		status = "disabled";
+	};
+};
+
+/*
+ * Z1 backlight: the display backlight is driven by the MT6323 ISINK
+ * current sinks (leds-mt6323). The LCD panel's LED string hangs off
+ * ISINK0; brightness control is the LED sysfs class
+ * (/sys/class/leds/<name>/brightness), matching the vendor 4.4
+ * /sys/class/leds/lcd-backlight path.
+ */
+&mt6323_leds {
+	status = "okay";
+	/* ISINK0 is the LCD backlight channel on the Z1 board. */
+	isink0 {
+		reg = <0>;
+		label = "lcd-backlight";
+		linux,default-trigger = "backlight";
+		default-state = "on";
 	};
 };
