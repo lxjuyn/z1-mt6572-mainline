@@ -1132,4 +1132,17 @@ config FUEL_GAUGE_MM8013
 	  the state of charge, temperature, cycle count, actual and design
 	  capacity, etc.
 
+config CHARGER_Z1_MT6323
+	tristate "Z1 MT6323 USB charger detection (RGS_CHRDET power_supply)"
+	depends on MFD_MT6397
+	help
+	  Say M here to build the Z1 MT6323 USB charger detector as a module.
+	  It reads the MT6323 RGS_CHRDET status bit (CHR_CON0 bit 5, the same
+	  bit the vendor 3.4.67 kernel's upmu_get_rgs_chrdet reads) and
+	  registers a power_supply of type USB whose "online" mirrors it,
+	  which is what the Android health HAL needs for chargerUsbOnline.
+	  Optionally also exposes the VCDT AUXADC tap voltage as voltage_now
+	  and arms the PMIC CHRDET irq (hwirq 10) for change notification,
+	  with a 2 s poll as fallback.
+
 endif # POWER_SUPPLY

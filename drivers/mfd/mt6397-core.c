@@ -157,6 +157,24 @@ static const struct mfd_cell mt6323_devs[] = {
 	}, {
 		.name = "mt6323-sound",
 		.of_compatible = "mediatek,mt6323-codec",
+	}, {
+		/*
+		 * Z1: USB charger detection (drivers/power/supply/z1_charger.c,
+		 * out-of-tree, CONFIG_CHARGER_Z1_MT6323=m).
+		 *
+		 * WHY THIS CELL IS REQUIRED: a DT child of &pmic does not become a
+		 * platform device by itself. This MFD only instantiates children
+		 * listed here via devm_mfd_add_devices(), matching the DT node by
+		 * of_compatible. Without this entry the "z1,mt6323-charger" node in
+		 * mt6572-z1.dts is inert and insmod z1_charger.ko never binds
+		 * (-ENODEV, no matching platform device) -- the driver's probe()
+		 * would never run no matter how many times it is loaded.
+		 *
+		 * Safe when the driver module is absent: MFD creates a device that
+		 * simply has no driver to bind to; no probe, no side effects.
+		 */
+		.name = "z1-charger",
+		.of_compatible = "z1,mt6323-charger",
 	},
 };
 
@@ -415,7 +433,7 @@ static int mt6397_probe(struct platform_device *pdev)
 		cells = mt6323_diagnostic_devs;
 		cell_size = ARRAY_SIZE(mt6323_diagnostic_devs);
 		dev_warn(&pdev->dev,
-			 "MT6323 regulator-only diagnostic mode; IRQ controller disabled\n");
+			 "MT6323 regulator-only diagnostic mode; IRQ controller disabled (no power key / RTC / LED)\n");
 	} else {
 		pmic->irq = platform_get_irq(pdev, 0);
 		if (pmic->irq <= 0)
@@ -428,6 +446,16 @@ static int mt6397_probe(struct platform_device *pdev)
 		cells = pmic_core->cells;
 		cell_size = pmic_core->cell_size;
 		irq_domain = pmic->irq_domain;
+
+		/*
+		 * Z1 bring-up: makes it unambiguous from the boot log which
+		 * mode this kernel booted in.  In this branch the PMIC keys
+		 * (power key, KEY_POWER) are among the exposed cells; in the
+		 * diagnostic branch above they are not created at all.
+		 */
+		dev_info(&pdev->dev,
+			 "IRQ controller enabled (irq %d), exposing %d MFD cells incl. PMIC keys\n",
+			 pmic->irq, cell_size);
 	}
 
 	ret = devm_mfd_add_devices(&pdev->dev, PLATFORM_DEVID_NONE,
