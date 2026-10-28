@@ -730,10 +730,16 @@ static int mt6572_afe_pcm_dev_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(afe->clk),
 				     "failed to get/enable the audio clock\n");
 
-	/* The AFE registers are in the parent audsys syscon window. */
-	ret = of_address_to_resource(dev->parent->of_node, 0, &res);
+	/*
+	 * The AFE node itself carries the register window in our DT (see
+	 * audio@11140000 in mt6572-z1.dts).  Reading the *parent* node instead
+	 * would resolve to the audsys syscon node, whose reg property does not
+	 * describe the AFE registers, so of_address_to_resource() would fail
+	 * and the probe would return -EINVAL: no sound card.
+	 */
+	ret = of_address_to_resource(dev->of_node, 0, &res);
 	if (ret)
-		return dev_err_probe(dev, ret, "no AFE reg in parent syscon\n");
+		return dev_err_probe(dev, ret, "no AFE reg in node\n");
 	base = devm_ioremap(dev, res.start, resource_size(&res));
 	if (!base)
 		return dev_err_probe(dev, -ENOMEM, "failed to map AFE registers\n");

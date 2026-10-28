@@ -201,3 +201,4 @@ Module.symvers
 *.jsonl
 /run_*.sh
 *_capture.log
+arch/arm/boot/dts/mediatek/*.backup_*
