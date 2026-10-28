@@ -437,6 +437,36 @@
 };
 
 /*
+ * VGP1 = touch panel AVDD28 (2.8V) on Z1, and the exact same
+ * zero-consumer trap as VEMC/VMC/VMCH/VUSB above -- but the one instance
+ * that was left unfixed, and the reason every historical touch run failed.
+ *
+ * Evidence chain (2026-10-28, byte-level, see HANDOFF_20261028.md §4.1):
+ *  - The only consumer in the whole tree is the (disabled) touchscreen@5d
+ *    node: AVDD28-supply = <&mt6323_vgp1_reg>. The custom polled driver
+ *    z1_cst836u.ko creates its own i2c client at runtime and therefore has
+ *    NO devm_regulator_get() calls at all (grep: 0 hits) -- it never touches
+ *    VGP1, it just assumes the rail is up.
+ *  - z1_gpio_hunt.ko, the fallback hunter, says so in its own comments
+ *    ("dts 已给 VGP1 加 always-on（上电根因已修）") -- but that edit was
+ *    never actually made. Both drivers assume someone else powered it.
+ *  - So VGP1 has zero consumers, mt6323.dtsi does NOT mark it boot-on
+ *    (unlike vmc/vmch/vusb), and regulator late-cleanup leaves it off.
+ *    Touch then NACKs at 0x15 forever: ENXIO = unpowered.
+ *
+ * This makes regulator_register() call _regulator_do_enable() directly at
+ * probe time (drivers/regulator/core.c:1647-1685), so AVDD28 is up long
+ * before z1_touch_load.sh runs in "on post-fs".
+ *
+ * Do NOT remove without replacing it with an explicit enable somewhere:
+ * the driver does not enable it itself, so dropping this silently returns
+ * the board to "touch chip absent or unpowered".
+ */
+&mt6323_vgp1_reg {
+	regulator-always-on;
+};
+
+/*
  * PMIC power/home keys.  The MT6323 "home" key maps to KEY_VOLUMEDOWN (114)
  * which duplicates the matrix keypad MATRIX_KEY(1, 0, KEY_VOLUMEDOWN) (see
  * &keyboard).  Disable the PMIC home key so volume-down is reported once;
