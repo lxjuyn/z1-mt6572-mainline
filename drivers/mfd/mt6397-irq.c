@@ -209,11 +209,56 @@ int mt6397_irq_init(struct mt6397_chip *chip)
 		return -ENODEV;
 	}
 
-	/* Mask all interrupt sources */
-	regmap_write(chip->regmap, chip->int_con[0], 0x0);
-	regmap_write(chip->regmap, chip->int_con[1], 0x0);
-	if (chip->int_con[2])
-		regmap_write(chip->regmap, chip->int_con[2], 0x0);
+	/*
+	 * Mask all interrupt sources.
+	 *
+	 * Z1: these are real serial writes to the PMIC through the pwrap
+	 * regmap, so they fail (-EPERM / -ETIMEDOUT) if the wrapper write
+	 * path is gated or broken.  Upstream ignored the return value,
+	 * which made a dead PMIC write path look like a successful probe.
+	 * Bail out loudly instead.
+	 */
+	ret = regmap_write(chip->regmap, chip->int_con[0], 0x0);
+	if (ret) {
+		dev_err(chip->dev, "failed to mask INT_CON0: %d\n", ret);
+		return ret;
+	}
+
+	ret = regmap_write(chip->regmap, chip->int_con[1], 0x0);
+	if (ret) {
+		dev_err(chip->dev, "failed to mask INT_CON1: %d\n", ret);
+		return ret;
+	}
+
+	if (chip->int_con[2]) {
+		ret = regmap_write(chip->regmap, chip->int_con[2], 0x0);
+		if (ret) {
+			dev_err(chip->dev, "failed to mask INT_CON2: %d\n", ret);
+			return ret;
+		}
+	}
+
+	/*
+	 * Z1 bring-up probe of the PMIC write path (belt and braces): read
+	 * INT_CON0 back and report it.  A write path that silently drops
+	 * writes leaves the bootloader's mask value here instead of 0x0000,
+	 * and a working path returns exactly 0x0000.  This one line in the
+	 * boot log tells us whether a dead power key is a PMIC-bus problem
+	 * or an interrupt/DT problem.
+	 */
+	{
+		unsigned int con0 = ~0U;
+
+		ret = regmap_read(chip->regmap, chip->int_con[0], &con0);
+		if (ret) {
+			dev_err(chip->dev, "INT_CON0 readback failed: %d\n", ret);
+			return ret;
+		}
+
+		dev_info(chip->dev,
+			 "PMIC write path verified: INT_CON0(0x%04x) readback 0x%04x (expect 0x0000)\n",
+			 chip->int_con[0], con0);
+	}
 
 	chip->pm_nb.notifier_call = mt6397_irq_pm_notifier;
 	chip->irq_domain = irq_domain_create_linear(dev_fwnode(chip->dev), MT6397_IRQ_NR,
