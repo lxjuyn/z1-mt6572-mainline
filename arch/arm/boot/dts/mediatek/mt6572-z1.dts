@@ -307,7 +307,38 @@
 	 */
 	sound: sound {
 		compatible = "mediatek,mt6572-mt6323-sound";
-		audio-routing = "Speaker", "Speaker", "Earpiece", "Earpiece";
+		/*
+		 * NO "audio-routing" HERE -- deliberate.
+		 *
+		 * The old value was:  audio-routing = "Speaker", "Speaker",
+		 *                                    "Earpiece", "Earpiece";
+		 * That is malformed. snd_soc_of_parse_audio_routing()
+		 * (sound/soc/soc-core.c) reads pairs as <sink>, <source>, so the
+		 * above meant sink="Speaker" source="Speaker" -- a self-loop that
+		 * can never carry audio. It also made the soundcard driver take the
+		 * snd_soc_of_parse_audio_routing() branch, which is only needed for
+		 * board-level wiring that the CODEC does not already define.
+		 *
+		 * On this board the whole playback path is already declared inside
+		 * the drivers:
+		 *   AFE    : {"ADDA Playback", NULL, "DL1"}         (mt6572-afe-pcm.c)
+		 *   codec  : {"DACL"/"DACR", NULL, "AIF1RX"}        (mt6323.c)
+		 *            {"Speaker",  NULL, "DACL"/"DACR"}
+		 *            {"Headphone",NULL, "DACL"/"DACR"}
+		 * and the machine dai_link binds CPU "mt6572-afe-dl1" to CODEC
+		 * "mt6397codec"/"mt6323-snd-codec-aif1". So there is no extra
+		 * board-level route to add, and inventing one is what produced the
+		 * self-loop.
+		 *
+		 * Omitting the property makes mtk-soundcard-driver.c take its
+		 * documented legacy-probe branch ("audio-routing not found: using
+		 * legacy probe", line ~218) and call the machine's soc_probe
+		 * (mt6572-mt6323.c:137 has .soc_probe, so this is supported).
+		 *
+		 * If a board-level route is ever genuinely needed (e.g. an external
+		 * amplifier enable pin), add it with the real <sink>, <source> pair
+		 * from the codec's DAPM widget list -- never a self-loop.
+		 */
 		mediatek,platform = <&audsys>;
 		mediatek,audio-codec = <&codec>;
 		status = "okay";
