@@ -64,7 +64,17 @@
 		 * channel for S6 which has no UART testpoints.
 		 */
 		linux,initrd-start = <0x84100000>;
-		linux,initrd-end = <0x842e1abf>;
+		/*
+		 * R5 (2026-10-28): synced to the ramdisk actually shipped in
+		 * R4.1 (out/ramdisk_r4_final.rootfs, body 1,976,932 B =
+		 * 0x1e2a64). The previous value here (0x842e1abf) was stale
+		 * and only matched the R4.1 image because z1_prepare_android9_
+		 * ramdisk.py patched the DTB after the build. Keeping the dts
+		 * in step means a plain `make mediatek/mt6572-z1.dtb` now
+		 * yields a directly bootable DTB, and the boot assembler's
+		 * initrd-end check (start + body size) passes unpatched.
+		 */
+		linux,initrd-end = <0x842e2a64>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
@@ -108,6 +118,41 @@
 
 		framebuffer_reserved: framebuffer@bf400000 {
 			reg = <0xbf400000 0xc00000>;
+			no-map;
+		};
+
+		/*
+		 * Z1 R5 (2026-10-28): ramoops crash black box.
+		 *
+		 * Z1's only console is the C3-bridge UART, and a boot that
+		 * dies before userspace leaves nothing behind. ramoops keeps
+		 * the last oops/panic console in DRAM across a reset, so the
+		 * next boot (or a host-side read) can replay why the board
+		 * went down.
+		 *
+		 * Placement: 0xbe200000..0xbe300000 sits between the CONN
+		 * carveout (0xbe000000+1MiB, shared EMI ends at 0xbe0d5c00)
+		 * and the framebuffer (0xbf400000+12MiB), and far from the
+		 * kernel (0x80008000+) and the initrd
+		 * (0x84100000..0x842e2a64). No overlap with any existing
+		 * reserved-memory child.
+		 *
+		 * no-map: keeps the window out of the linear map and out of
+		 * /proc/iomem System RAM, so nothing else can hand these
+		 * pages to the allocator or scribble on them.
+		 *
+		 * Sizes: 128KiB record (one oops each) + 256KiB console +
+		 * 128KiB pmsg = 512KiB of the 1MiB window; the remainder is
+		 * left as spare so a future size bump does not need a new
+		 * carveout. PSTORE/PSTORE_RAM/PSTORE_CONSOLE/PSTORE_PMSG are
+		 * already =y in the Z1 config; only this node was missing.
+		 */
+		ramoops: ramoops@be200000 {
+			compatible = "ramoops";
+			reg = <0xbe200000 0x100000>;
+			record-size = <0x20000>;
+			console-size = <0x40000>;
+			pmsg-size = <0x20000>;
 			no-map;
 		};
 
@@ -399,6 +444,39 @@
 	pinctrl-names = "default";
 	interrupts-extended = <&pio 7 IRQ_TYPE_LEVEL_HIGH>;
 	status = "okay";
+
+	/*
+	 * Z1 R5: USB charger detection (drivers/power/supply/z1_charger.c,
+	 * pending on the R5 kernel build; harmless while the module is not
+	 * built -- nothing probes an unclaimed compatible).
+	 *
+	 * Child of the MT6323 PMIC so the driver can reuse the pwrap regmap
+	 * (dev_get_regmap(dev->parent->parent), the same chain
+	 * mt6323-auxadc uses) and the PMIC irq domain.
+	 *
+	 * online   <- CHR_CON0 (0x0000) bit 5 RGS_CHRDET, the only charger
+	 *             presence bit the vendor 3.4.67 kernel reads
+	 *             (upmu_get_rgs_chrdet, upmu_common.c:77).
+	 * voltage  <- AUXADC channel 4 VCDT (MT6323_AUXADC_VCDT = 4, defined
+	 *             in dt-bindings/iio/adc/mediatek,mt6323-auxadc.h and
+	 *             exported as "vcdt" by drivers/iio/adc/mt6323-auxadc.c).
+	 * IRQ 10   <- MT6323_IRQ_STATUS_CHRDET (include/linux/mfd/mt6323/
+	 *             core.h:20). The MT6397-family MFD irq domain is
+	 *             onecell, so cell[0] is the hwirq; the type cell is
+	 *             advisory. IRQ_TYPE_LEVEL_HIGH comes in via
+	 *             mt6572.dtsi -> dt-bindings/interrupt-controller/irq.h.
+	 *
+	 * kernel-side power_supply type is "USB", which is what the
+	 * Android 9 health HAL reads to set chargerUsbOnline.
+	 */
+	z1_charger: usb-charger {
+		compatible = "z1,mt6323-charger";
+		io-channels = <&mt6323_adc MT6323_AUXADC_VCDT>;
+		io-channel-names = "vcdt";
+		interrupt-parent = <&pmic>;
+		interrupts = <10 IRQ_TYPE_LEVEL_HIGH>;	/* MT6323_IRQ_STATUS_CHRDET */
+		status = "okay";
+	};
 };
 
 &mt6323regulator {
