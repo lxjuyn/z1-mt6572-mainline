@@ -73,8 +73,14 @@
 		 * in step means a plain `make mediatek/mt6572-z1.dtb` now
 		 * yields a directly bootable DTB, and the boot assembler's
 		 * initrd-end check (start + body size) passes unpatched.
+		 * r5c (2026-10-30 resync): the r5c packaging shipped a new
+		 * ramdisk (file 1,977,962 B incl. 512B MTK ROOTFS header, body
+		 * 1,977,450 = 0x1e2c6a), so end = 0x84100000 + 0x1e2c6a =
+		 * 0x842e2c6a. That value lived only in the packed boot.img dtb
+		 * (sha 1a2c5689...) and was never committed; this makes the
+		 * tree build byte-identical to it (out/R5C_VERIFY.md A.3/A.5).
 		 */
-		linux,initrd-end = <0x842e2a64>;
+		linux,initrd-end = <0x842e2c6a>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
