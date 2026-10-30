@@ -45,6 +45,37 @@
 #define PLL_FREQ(_id, _name, _base, _en_mask, _rst_bar_mask, _flags, _fmin, _fmax) \
 	PLL_DIV(_id, _name, _base, _en_mask, _rst_bar_mask, _flags, _fmin, _fmax, NULL)
 
+/*
+ * Integer-PCW variant.  On MT6572 the SDM PLLs (armpll/mainpll/whpll) encode
+ * their feedback divider as 7 integer bits + 14 fractional bits (pcwbits=21,
+ * e.g. armpll runs at 26 MHz * 38.5 = 1001 MHz), but UNIVPLL uses a plain
+ * integer divider in bits[6:0] -- i.e. pcwbits=7, no fractional part.
+ *
+ * Registering UNIVPLL through PLL_DIV (pcwbits=21) makes the framework treat
+ * the raw value 48 as Q14, decoding 1248 MHz as 26e6 * 48 >> 14 = 76172 Hz.
+ * Every consumer of the univpll branch then reports ~2^14 too low: upll_d3
+ * (the default mfg_sel parent) reads back as 25390 instead of 416 MHz, and
+ * univ_48m as ~2930 Hz instead of 48 MHz.
+ */
+#define PLL_FREQ_INT(_id, _name, _base, _en_mask, _rst_bar_mask, _flags, _fmin, \
+		     _fmax)                                                  \
+	{ .id = _id,                                                       \
+	  .name = _name,                                                   \
+	  .parent_name = "clk26m",                                         \
+	  .reg = (_base) + REG_CON0,                                       \
+	  .pwr_reg = (_base) + REG_PWR_CON0,                               \
+	  .en_mask = _en_mask,                                             \
+	  .rst_bar_mask = _rst_bar_mask,                                   \
+	  .pd_reg = (_base) + REG_CON1,                                    \
+	  .pd_shift = 24,                                                  \
+	  .pcw_reg = (_base) + REG_CON1,                                   \
+	  .pcw_chg_reg = (_base) + REG_CON1,                               \
+	  .pcwbits = 7,                                                    \
+	  .flags = _flags,                                                 \
+	  .fmin = _fmin,                                                   \
+	  .fmax = _fmax,                                                   \
+	  .div_table = NULL }
+
 #define PLL(_id, _name, _base, _en_mask, _rst_bar_mask, _flags) \
 	PLL_DIV(_id, _name, _base, _en_mask, _rst_bar_mask, _flags, 0, 0, NULL)
 
@@ -64,7 +95,7 @@ static const struct mtk_pll_data apmixedsys_plls[] = {
 	PLL_FREQ(CLK_APMIXED_MAINPLL, "mainpll", MAINPLL_OFFSET, 0x00000011,
 	    CON0_RST_BAR, PLL_AO | HAVE_RST_BAR, 1000 * MHZ, 1800 * MHZ),
 
-	PLL_FREQ(CLK_APMIXED_UNIVPLL, "univpll", UNIVPLL_OFFSET, 0x30000011,
+	PLL_FREQ_INT(CLK_APMIXED_UNIVPLL, "univpll", UNIVPLL_OFFSET, 0x30000011,
 	    CON0_RST_BAR, HAVE_RST_BAR, 1248 * MHZ, 1248 * MHZ),
 
 	PLL_DIV(CLK_APMIXED_WHPLL, "whpll", WHPLL_OFFSET, 0x00000011, 0, 0,
