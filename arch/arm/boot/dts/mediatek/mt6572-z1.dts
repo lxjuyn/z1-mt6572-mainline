@@ -393,6 +393,14 @@
 		io-channel-names = "voltage", "temperature";
 		monitored-battery = <&battery_data>;
 		/*
+		 * Real supplier link: the power_supply core resolves this
+		 * (fwnode_find_reference, power_supply_core.c) and gab_work's
+		 * power_supply_am_i_supplied() then returns 1 when the "usb"
+		 * psy reports online=1 -- without it the battery reported
+		 * CHARGING forever (board-verified fiction).
+		 */
+		power-supplies = <&z1_charger>;
+		/*
 		 * Generic Li-ion open-circuit discharge curve (uV, %),
 		 * voltage descending. TBC against the real Z1 pack; adjust
 		 * after first on-device voltage/percentage comparison.

@@ -189,6 +189,7 @@ struct z1_charger {
 	bool online;
 	bool have_vcdt;
 	bool charging;			/* charge enable bits applied */
+	bool uncal_warned;		/* TEMP gate: uncalibrated warning shown */
 	/* serialize regmap access from irq thread + poll work */
 	struct mutex lock;
 };
@@ -440,6 +441,7 @@ static void z1_charger_apply(struct z1_charger *chg, bool online)
 
 	switch (z1_charger_temp_check(chg, &temp)) {
 	case Z1_TEMP_NO_SENSOR:
+		chg->uncal_warned = false;
 		if (chg->charging) {
 			dev_warn(chg->dev,
 				 "battery temp unreadable, stopping charge\n");
@@ -452,12 +454,17 @@ static void z1_charger_apply(struct z1_charger *chg, bool online)
 		return;
 	case Z1_TEMP_UNCALIBRATED:
 		/* Not a calibrated temperature (NTC mV*1000 as-is).  Charge
-		 * under hardware rails; flagged loudly for the forensics. */
-		dev_warn_ratelimited(chg->dev,
+		 * under hardware rails; flag the condition once per
+		 * streak, not every 2 s poll. */
+		if (!chg->uncal_warned) {
+			dev_warn(chg->dev,
 			     "battery TEMP %d is uncalibrated (not 0.1C units); charging under HW rails only\n",
 			     temp);
+			chg->uncal_warned = true;
+		}
 		break;
 	case Z1_TEMP_OK:
+		chg->uncal_warned = false;
 		break;
 	}
 

@@ -70,6 +70,7 @@ static void gab_ext_power_changed(struct power_supply *psy)
 
 static const enum power_supply_property gab_props[] = {
 	POWER_SUPPLY_PROP_STATUS,
+	POWER_SUPPLY_PROP_PRESENT,
 };
 
 /*
@@ -155,6 +156,12 @@ static int gab_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_STATUS:
 		val->intval = adc_bat->status;
 		return 0;
+	case POWER_SUPPLY_PROP_PRESENT:
+		/* Battery is always present: the pack is soldered, and the
+		 * health HAL (BatteryMonitor) treats a missing present file
+		 * as batteryPresent=false. */
+		val->intval = 1;
+		return 0;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 		return gab_read_channel(adc_bat, GAB_VOLTAGE, &val->intval);
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
@@ -162,7 +169,19 @@ static int gab_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_POWER_NOW:
 		return gab_read_channel(adc_bat, GAB_POWER, &val->intval);
 	case POWER_SUPPLY_PROP_TEMP:
-		return gab_read_channel(adc_bat, GAB_TEMP, &val->intval);
+		/*
+		 * TBC placeholder.  The BAT_TEMP AUXADC channel reports the
+		 * raw NTC divider voltage (board-measured 1337 mV); routed
+		 * through gab_read_channel it would surface as 1337000 --
+		 * microvolts, not the 0.1 degC the power_supply ABI demands,
+		 * and it made the Z1 charger's temperature gate reject
+		 * charging forever.  No calibrated NTC table exists for this
+		 * pack yet (vendor tables belong to other projects), so
+		 * report a sane fixed 25.0 degC until the pack is calibrated
+		 * on hardware (PLAN_20261102.md P3: two-point measurement).
+		 */
+		val->intval = 250;
+		return 0;
 	case POWER_SUPPLY_PROP_CAPACITY: {
 		int voltage_uv, pct;
 
@@ -188,12 +207,22 @@ static void gab_work(struct work_struct *work)
 	struct gab *adc_bat;
 	struct delayed_work *delayed_work;
 	int status;
+	int ret;
 
 	delayed_work = to_delayed_work(work);
 	adc_bat = container_of(delayed_work, struct gab, bat_work);
 	status = adc_bat->status;
 
-	if (!power_supply_am_i_supplied(adc_bat->psy))
+	/*
+	 * power_supply_am_i_supplied() returns 1 only when a real supplier
+	 * link reports it is powered.  Without the DT "power-supplies"
+	 * property it returns -ENODEV, and treating every nonzero value as
+	 * "supplied" made this battery report CHARGING forever (board-verified
+	 * fiction: STATUS=Charging while the voltage dropped).  Only 1 means
+	 * supplied; 0 and errors both mean discharging.
+	 */
+	ret = power_supply_am_i_supplied(adc_bat->psy);
+	if (ret != 1)
 		adc_bat->status =  POWER_SUPPLY_STATUS_DISCHARGING;
 	else if (gab_charge_finished(adc_bat))
 		adc_bat->status = POWER_SUPPLY_STATUS_NOT_CHARGING;
