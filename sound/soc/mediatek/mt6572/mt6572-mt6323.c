@@ -34,11 +34,12 @@ static const struct snd_kcontrol_new mt6572_mt6323_controls[] = {
 };
 
 /*
- * The codec component name is the DT node name of the codec under the PMIC
- * ("mt6397codec" in arch/arm/boot/dts/mediatek/mt6323.dtsi) — ASoC matches
- * dai_link codecs by component->name, which for a DT device is the node
- * name. The gabin8 upstream name "mt6323-sound" does not exist in this
- * tree's DT.
+ * The codec is bound by of_node (see soc_card_probe): an MFD child's ASoC
+ * component name is fmt_single_name(dev)-based ("mt6323-codec.N"), never its
+ * DT node name, so a COMP_CODEC("mt6397codec", ...) string can never match.
+ * The of_node is parsed from the card's "mediatek,audio-codec" phandle and
+ * installed on the DL1 link at probe time.  The DAI name below is exact
+ * (mt6323.c:418).
  */
 SND_SOC_DAILINK_DEFS(playback,
 	DAILINK_COMP_ARRAY(COMP_CPU("mt6572-afe-dl1")),
@@ -101,23 +102,34 @@ static int mt6572_mt6323_soc_card_probe(struct mtk_soc_card_data *soc_card_data,
 					bool legacy)
 {
 	struct snd_soc_card *card = soc_card_data->card_data->card;
+	struct device_node *codec_np;
 	struct snd_soc_dai_link *dai_link;
 	int i;
 
-	/*
-	 * The z1 dts omits "audio-routing" on purpose (the board has no
-	 * extra board-level route beyond what AFE + codec already declare),
-	 * which makes mtk_soundcard_common_probe() take its legacy branch
-	 * and call us with legacy=true.  Rejecting that here made every
-	 * probe fail with -EINVAL and no card ever registered.  The static
-	 * dai_links below are complete (SND_SOC_DAILINK_REG carries the
-	 * real cpu/codec names), so legacy mode is fully usable -- wire the
-	 * accdet hook the same way in both modes.
-	 */
 	(void)legacy;
+
+	/*
+	 * Bind the codec by of_node, not by component name.  An MFD child's
+	 * ASoC component name comes from fmt_single_name(dev) (the platform
+	 * device name, "mt6323-codec.N") -- never from its DT node name -- so
+	 * COMP_CODEC("mt6397codec", ...) fails snd_soc_is_matching_component()'s
+	 * strict strcmp and the card defers forever ("Cannot register card").
+	 * The z1 dts carries the phandle directly (mediatek,audio-codec =
+	 * <&codec> -> mt6397codec), which equals the MFD child's of_node.
+	 * The reference is kept for the card's lifetime; the card device is
+	 * this module's only consumer, so an explicit of_node_put on removal
+	 * is unnecessary here.
+	 */
+	codec_np = of_parse_phandle(card->dev->of_node, "mediatek,audio-codec", 0);
+	if (!codec_np) {
+		dev_err(card->dev, "mediatek,audio-codec phandle missing\n");
+		return -EINVAL;
+	}
 
 	for_each_card_prelinks(card, i, dai_link) {
 		if (strcmp(dai_link->name, "DL1") == 0) {
+			dai_link->codecs->of_node = codec_np;
+			dai_link->codecs->name = NULL;
 			dai_link->init = mt6572_mt6323_accdet_init;
 			break;
 		}
