@@ -552,6 +552,40 @@
 };
 
 /*
+ * VGPU/VPROC: raise the buck_vproc floor to the vendor DVFS table value.
+ *
+ * The Mali-400 on MT6572 has NO dedicated VGPU rail -- it shares the
+ * MT6323 buck_vproc with the CPUs.  Evidence (vendor 3.4.67 kernel,
+ * out/boot_extracted/kernel.bin, strings @0x957620):
+ *   mt_gpufreqs_power[] = (freq kHz, volt mV, power mW):
+ *     500500 1250 / 416000 1250 / 500500 1150 / 416000 1150 /
+ *     299000 1250 / 299000 1150
+ * i.e. every GPU OPP (299/416/500.5 MHz) is rated at 1150 mV, and the
+ * vendor CPU table in the same image pairs 1001000 kHz with 1150 mV too,
+ * confirming the shared rail.  The driver writes it via the PMIC
+ * BUCK_VPROC_VOLTAGE registers (strings "BUCK_VPROC_VOLTAGE" and
+ * "Current GPU volt setting is %d MV" in the same kernel).
+ *
+ * Mainline: drivers/regulator/mt6323-regulator.c exposes buck_vproc
+ * (700-1350 mV, 6.25 mV step, VPROC_CON7 vsel).  Raising only the DT
+ * minimum (max stays 1350000) is the smallest intervention: at probe
+ * time the regulator core (machine_constraints_voltage,
+ * drivers/regulator/core.c:1218; DT min/max nonzero => apply_uV,
+ * drivers/regulator/of_regulator.c:110-111) reads the current VPROC
+ * voltage left by LK and, if it is below 1150 mV, raises it to exactly
+ * 1150 mV, logging "Bringing <cur> uV into 1150000-1350000 uV".
+ * If LK already left >= 1.15 V the regulator is left untouched, so no
+ * CPU undervolt variable is introduced.
+ *
+ * Board check: dmesg | grep "Bringing .* into 1150000-1350000 uV"
+ * (presence = VPROC was low and has been fixed; absence = VPROC was
+ * already adequate, look elsewhere for the rendering artifacts).
+ */
+&mt6323_vproc_reg {
+	regulator-min-microvolt = <1150000>;
+};
+
+/*
  * VGP1 = touch panel AVDD28 (2.8V) on Z1, and the exact same
  * zero-consumer trap as VEMC/VMC/VMCH/VUSB above -- but the one instance
  * that was left unfixed, and the reason every historical touch run failed.
