@@ -92,7 +92,7 @@ struct z1_charger {
 	struct mutex lock;
 };
 
-static const char *const z1_charger_psy_name = "z1_charger";
+static const char *const z1_charger_psy_name = "usb"; /* std name so the A9 health HAL isPowered() sees the charger */
 
 static int z1_charger_read_online(struct z1_charger *chg, bool *online)
 {
