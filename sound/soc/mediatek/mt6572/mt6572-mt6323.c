@@ -104,8 +104,17 @@ static int mt6572_mt6323_soc_card_probe(struct mtk_soc_card_data *soc_card_data,
 	struct snd_soc_dai_link *dai_link;
 	int i;
 
-	if (legacy)
-		return -EINVAL;
+	/*
+	 * The z1 dts omits "audio-routing" on purpose (the board has no
+	 * extra board-level route beyond what AFE + codec already declare),
+	 * which makes mtk_soundcard_common_probe() take its legacy branch
+	 * and call us with legacy=true.  Rejecting that here made every
+	 * probe fail with -EINVAL and no card ever registered.  The static
+	 * dai_links below are complete (SND_SOC_DAILINK_REG carries the
+	 * real cpu/codec names), so legacy mode is fully usable -- wire the
+	 * accdet hook the same way in both modes.
+	 */
+	(void)legacy;
 
 	for_each_card_prelinks(card, i, dai_link) {
 		if (strcmp(dai_link->name, "DL1") == 0) {
