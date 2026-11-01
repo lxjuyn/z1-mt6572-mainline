@@ -71,11 +71,14 @@
  *     CHR_CON13 EN=0, CHR_CON0 CSDAC_EN/CHR_EN=0, CHR_CON23 HWCV_EN=0.
  *
  * Safety rails: CV 4.2 V + HW VBAT_OV 4.3 V + WDT kept armed + 450 mA
- * start current (USB-port conservative) + software temperature gate: the
- * battery psy ("battery", generic-adc-battery) must report 0..50 degC,
- * and a missing/unreadable temperature means NOT charging.  Suspend will
- * stop the feed and thus charging after 4 s -- acceptable for now, revisit
- * if autosuspend ever bites on this device.
+ * start current (USB-port conservative) + software temperature gate with
+ * an uncalibrated-sensor escape: battery TEMP in 0..500 (0.1 degC) gates
+ * normally, an unreadable TEMP means NOT charging (fail-safe), and a TEMP
+ * reading far outside that window is not a temperature at all (gab feeds
+ * the NTC divider in microVolts -- board-measured 1337000) so charging is
+ * allowed under the hardware rails with a warning.  Suspend will stop the
+ * feed and thus charging after 4 s -- acceptable for now, revisit if
+ * autosuspend ever bites on this device.
  */
 
 #include <linux/workqueue.h>
@@ -144,10 +147,26 @@
 #define Z1_CS_VTH_450MA			12	/* CS_VTH idx12 = 450 mA */
 #define Z1_VBAT_OV_VTH_4V3		1	/* vendor: 4.3 V */
 
-/* Battery temperature gate (psy TEMP unit: 0.1 degC).  Outside -> no
- * charge; unreadable temperature also means no charge. */
+/* Battery temperature gate against the battery psy TEMP property (ABI
+ * unit: tenths of degC).  Board-measured reality (workflow review
+ * 2026-11-01, source-reproduced): gab TEMP is fed the BAT_TEMP AUXADC
+ * channel through the same *1000 path as VOLTAGE, so it reports the raw
+ * NTC divider voltage in microVolts (1337000 = 1337 mV on board), NOT a
+ * temperature -- no calibrated NTC table exists for this pack yet.  So:
+ *   in 0..500 window         -> gate applies normally
+ *   read fails / no psy      -> fail-safe: no charge
+ *   reads but value > window -> uncalibrated sensor, not a temperature:
+ *     allow charging (hardware rails are the safety net: CV 4.2 V,
+ *     HW VBAT_OV 4.3 V, 4 s watchdog, 450 mA) and warn.
+ * NTC calibration + real software gate is deferred to a later round. */
 #define Z1_TEMP_MIN			0	/* 0 degC */
 #define Z1_TEMP_MAX			500	/* 50.0 degC */
+
+enum z1_temp_gate {
+	Z1_TEMP_OK = 0,		/* in window: gate verdict applies */
+	Z1_TEMP_NO_SENSOR,	/* unreadable: fail-safe, no charge */
+	Z1_TEMP_UNCALIBRATED,	/* not a temperature: charge, hardware rails only */
+};
 
 /* Name of the generic-adc-battery psy on this device (board-verified:
  * /sys/class/power_supply/battery/). */
@@ -377,22 +396,24 @@ static int z1_charger_feed_wdt(struct z1_charger *chg)
 	return ret;
 }
 
-/* Temperature gate against the battery psy.  Returns 1 if charging is
- * allowed, 0 otherwise (missing psy, missing TEMP property, or out of
- * 0..50 degC).  Missing/unreadable temperature is fail-safe: no charge. */
-static bool z1_charger_temp_ok(struct z1_charger *chg, int *temp)
+/* Temperature gate against the battery psy.  Returns the gate state and
+ * leaves the raw TEMP reading in *temp (for logging). */
+static enum z1_temp_gate z1_charger_temp_check(struct z1_charger *chg,
+					       int *temp)
 {
 	union power_supply_propval val;
 	int ret;
 
 	if (!chg->bat_psy)
-		return false;
+		return Z1_TEMP_NO_SENSOR;
 	ret = power_supply_get_property(chg->bat_psy,
 					POWER_SUPPLY_PROP_TEMP, &val);
 	if (ret)
-		return false;
+		return Z1_TEMP_NO_SENSOR;
 	*temp = val.intval;
-	return *temp >= Z1_TEMP_MIN && *temp <= Z1_TEMP_MAX;
+	if (*temp >= Z1_TEMP_MIN && *temp <= Z1_TEMP_MAX)
+		return Z1_TEMP_OK;
+	return Z1_TEMP_UNCALIBRATED;
 }
 
 /* Called with chg->lock held, once per poll tick (2 s).  Applies the
@@ -417,22 +438,27 @@ static void z1_charger_apply(struct z1_charger *chg, bool online)
 			return; /* battery driver not up yet: stay off */
 	}
 
-	if (!z1_charger_temp_ok(chg, &temp)) {
+	switch (z1_charger_temp_check(chg, &temp)) {
+	case Z1_TEMP_NO_SENSOR:
 		if (chg->charging) {
 			dev_warn(chg->dev,
-				 "battery temp %d (0.1C) out of gate, stopping charge\n",
-				 temp);
+				 "battery temp unreadable, stopping charge\n");
 			z1_charger_disable(chg);
 			chg->charging = false;
-		} else if (temp != INT_MIN) {
-			dev_warn_ratelimited(chg->dev,
-				 "battery temp %d (0.1C) out of gate, not charging\n",
-				 temp);
 		} else {
 			dev_dbg(chg->dev,
-				"battery temp unavailable, not charging\n");
+				"battery temp unreadable, not charging\n");
 		}
 		return;
+	case Z1_TEMP_UNCALIBRATED:
+		/* Not a calibrated temperature (NTC mV*1000 as-is).  Charge
+		 * under hardware rails; flagged loudly for the forensics. */
+		dev_warn_ratelimited(chg->dev,
+			     "battery TEMP %d is uncalibrated (not 0.1C units); charging under HW rails only\n",
+			     temp);
+		break;
+	case Z1_TEMP_OK:
+		break;
 	}
 
 	if (!chg->charging) {
