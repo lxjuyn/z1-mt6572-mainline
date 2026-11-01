@@ -267,14 +267,40 @@ int mt6397_irq_init(struct mt6397_chip *chip)
 		return -ENOMEM;
 	}
 
+	/*
+	 * Z1: the MT6323 DT interrupt (interrupt-parent = <&pio>,
+	 * interrupts = <150 IRQ_TYPE_LEVEL_HIGH>) lives on the mt-eint
+	 * irqchip.  mtk_eint_irq_request_resources() must xlate that hwirq
+	 * back into a pin via the pinctrl gpio_xlate, and mt6572-pinctrl
+	 * cannot: it prints "Can not find pin" and returns -EINVAL, so
+	 * request_irq(37) fails (board-proven,
+	 * z1_boot_mainline_20261101_000604.log lines 809-813: -EINVAL ->
+	 * "failed to register irq=37; err: -22" -> "probe ... failed with
+	 * error -22").  The PMIC pwrap bus itself is healthy - the INT_CON0
+	 * readback above returned 0x0000 - so this is purely an
+	 * irq-request/pinctrl mapping gap, not a dead PMIC.
+	 *
+	 * Abort the probe here (mainline behaviour) and the whole MFD dies
+	 * with it: regulators, keys, RTC, LEDs, codec and charger cells are
+	 * never added, which took down card0, the power key and made
+	 * battery/usb defer waiting for the mt6323 ldo_vusb / adc suppliers.
+	 * Keep the r5c-era effective behaviour instead: report the errno
+	 * loudly and let the probe continue.  We deliberately keep
+	 * chip->irq_domain (devm_mfd_add_devices() needs it to map the
+	 * cells' IRQ resources) and skip register_pm_notifier() because
+	 * enable_irq_wake() in the PM notifier would act on an irq that has
+	 * no installed handler.  PMIC interrupt delivery stays dead until
+	 * the mt6572 EINT xlate gap is fixed; DT enumeration completeness
+	 * wins.
+	 */
 	ret = devm_request_threaded_irq(chip->dev, chip->irq, NULL,
 					mt6397_irq_thread, IRQF_ONESHOT,
 					"mt6397-pmic", chip);
 	if (ret) {
-		dev_err(chip->dev, "failed to register irq=%d; err: %d\n",
+		dev_err(chip->dev,
+			"failed to register irq=%d; err: %d (continuing: keep irq_domain, PMIC cells keep probing)\n",
 			chip->irq, ret);
-		irq_domain_remove(chip->irq_domain);
-		return ret;
+		return 0;
 	}
 
 	register_pm_notifier(&chip->pm_nb);
