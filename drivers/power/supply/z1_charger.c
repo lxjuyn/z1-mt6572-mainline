@@ -45,6 +45,37 @@
  *   2. A 2 Hz polling work as a belt-and-braces fallback (the RGS bit is
  *      live hardware comparator output; polling alone still yields correct
  *      online state, just with up to ~2 s latency).
+ *
+ * Charging control (2026-11-01, vendor-extracted bit map, no guessed bits)
+ * -------------------------------------------------------------------
+ * The Z1 charger is the MT6323 built-in linear charger; charging only ever
+ * happened in LK power-off mode before this.  The enable sequence and every
+ * register/bit below are copied from the vendor 3.4.67 MT6572 kernel
+ * charging_hw_pmic.c (archived: mainline_recon/vendor_ref_mt6323_charger/,
+ * source Intelinsidecom/kernel_ckpt72_w_kk-mt6572 branch main):
+ *
+ *   charging_enable(TRUE):  CSDAC_DLY=4, CSDAC_STP=1 (CHR_CON21),
+ *     CSDAC_STP_INC=1, CSDAC_STP_DEC=2 (CHR_CON20), CS_EN (CHR_CON2.3),
+ *     HWCV_EN (CHR_CON23.6), VBAT_CV_EN (CHR_CON2.1), CSDAC_EN (CHR_CON0.3),
+ *     CHR_EN (CHR_CON0.4, master), CV=4.2V (CHR_CON3 VBAT_CV_VTH=0),
+ *     CC=450mA (CHR_CON4 CS_VTH=12; vendor table index 12).
+ *   CHRWDT: CHR_CON13 TD[3:0]=0 (4 s), EN.4, WR.8; CHR_CON15 INT_EN.0,
+ *     FLAG_WR.1.  The watchdog must be re-fed faster than 4 s or the
+ *     hardware cuts charging by itself -- the 2 s poll work is the feed
+ *     heartbeat (2x margin), so driver death also stops charging (safe).
+ *   HW init (vendor charging_hw_init): VBAT_OV_EN + VBAT_OV_VTH=1 (4.3 V)
+ *     CHR_CON6, VCDT_HV_EN CHR_CON1.0, USBDL force-exit CHR_CON16.2/.3,
+ *     BC11 reset CHR_CON18.0/.1, CSDAC_MODE CHR_CON23.2, BATON_EN CHR_CON7.0,
+ *     ULC_DET_EN CHR_CON23.7, LOW_ICH_DB CHR_CON22[5:0]=1.
+ *   disable (vendor FALSE branch): CHR_CON15 INT_EN/FLAG_WR=0,
+ *     CHR_CON13 EN=0, CHR_CON0 CSDAC_EN/CHR_EN=0, CHR_CON23 HWCV_EN=0.
+ *
+ * Safety rails: CV 4.2 V + HW VBAT_OV 4.3 V + WDT kept armed + 450 mA
+ * start current (USB-port conservative) + software temperature gate: the
+ * battery psy ("battery", generic-adc-battery) must report 0..50 degC,
+ * and a missing/unreadable temperature means NOT charging.  Suspend will
+ * stop the feed and thus charging after 4 s -- acceptable for now, revisit
+ * if autosuspend ever bites on this device.
  */
 
 #include <linux/workqueue.h>
@@ -73,26 +104,79 @@
  */
 #define Z1_CHR_CON0_RGS_CHRDET_SHIFT	5
 
+/* Charger control bits, vendor upmu_hw.h (see header comment).  Register
+ * addresses are MT6323_CHR_CONn from <linux/mfd/mt6323/registers.h>. */
+#define Z1_CHR_CON0_VCDT_HV_EN		BIT(0)
+#define Z1_CHR_CON0_CSDAC_EN		BIT(3)
+#define Z1_CHR_CON0_CHR_EN		BIT(4)
+#define Z1_CHR_CON1_VCDT_HV_EN		BIT(0)
+#define Z1_CHR_CON2_VBAT_CV_EN		BIT(1)
+#define Z1_CHR_CON2_CS_EN		BIT(3)
+#define Z1_CHR_CON3_VBAT_CV_VTH_MASK	0x1f	/* [4:0], idx0 = 4.2 V */
+#define Z1_CHR_CON4_CS_VTH_MASK		0xf	/* [3:0], idx12 = 450 mA */
+#define Z1_CHR_CON6_VBAT_OV_EN		BIT(0)
+#define Z1_CHR_CON6_VBAT_OV_VTH_MASK	0x7	/* [3:1], 1 = 4.3 V */
+#define Z1_CHR_CON6_VBAT_OV_VTH_SHIFT	1
+#define Z1_CHR_CON7_BATON_EN		BIT(0)
+#define Z1_CHR_CON10_PCHR_FLAG_EN	BIT(4)
+#define Z1_CHR_CON13_CHRWDT_TD_MASK	0xf	/* [3:0], 0 = 4 s */
+#define Z1_CHR_CON13_CHRWDT_EN		BIT(4)
+#define Z1_CHR_CON13_CHRWDT_WR		BIT(8)
+#define Z1_CHR_CON15_CHRWDT_INT_EN	BIT(0)
+#define Z1_CHR_CON15_CHRWDT_FLAG_WR	BIT(1)
+#define Z1_CHR_CON16_USBDL_RST		BIT(2)
+#define Z1_CHR_CON16_USBDL_SET		BIT(3)
+#define Z1_CHR_CON18_BC11_BB_CTRL	BIT(0)
+#define Z1_CHR_CON18_BC11_RST		BIT(1)
+#define Z1_CHR_CON20_CSDAC_STP_INC_MASK	0x7	/* [2:0] */
+#define Z1_CHR_CON20_CSDAC_STP_DEC_MASK	0x7	/* [6:4] */
+#define Z1_CHR_CON20_CSDAC_STP_DEC_SHIFT 4
+#define Z1_CHR_CON21_CSDAC_DLY_MASK	0x7	/* [2:0] */
+#define Z1_CHR_CON21_CSDAC_STP_MASK	0x7	/* [6:4] */
+#define Z1_CHR_CON21_CSDAC_STP_SHIFT	4
+#define Z1_CHR_CON22_LOW_ICH_DB_MASK	0x3f	/* [5:0] */
+#define Z1_CHR_CON23_CSDAC_MODE		BIT(2)
+#define Z1_CHR_CON23_HWCV_EN		BIT(6)
+#define Z1_CHR_CON23_ULC_DET_EN		BIT(7)
+
+/* Charger setpoints (vendor tables, conservative picks). */
+#define Z1_CV_VTH_4V2			0	/* VBAT_CV_VTH idx0 = 4.2 V */
+#define Z1_CS_VTH_450MA			12	/* CS_VTH idx12 = 450 mA */
+#define Z1_VBAT_OV_VTH_4V3		1	/* vendor: 4.3 V */
+
+/* Battery temperature gate (psy TEMP unit: 0.1 degC).  Outside -> no
+ * charge; unreadable temperature also means no charge. */
+#define Z1_TEMP_MIN			0	/* 0 degC */
+#define Z1_TEMP_MAX			500	/* 50.0 degC */
+
+/* Name of the generic-adc-battery psy on this device (board-verified:
+ * /sys/class/power_supply/battery/). */
+#define Z1_BATTERY_PSY_NAME		"battery"
+
+#define Z1_CHARGER_POLL_MS		2000
+
 /* AUXADC VCDT: IIO_VOLTAGE processed value is millivolts (the auxadc
  * provider's scale is 1800 mV / 2^15 raw, mt6323-auxadc.c
  * IIO_CHAN_INFO_SCALE); power_supply voltage_now takes uV, same *1000
  * convention as generic-adc-battery. */
-
-#define Z1_CHARGER_POLL_MS		2000
 
 struct z1_charger {
 	struct device *dev;
 	struct regmap *regmap;
 	struct power_supply *psy;
 	struct iio_channel *chan_vcdt;
+	struct power_supply *bat_psy;	/* "battery", for the temp gate */
 	struct delayed_work poll_work;
 	bool online;
 	bool have_vcdt;
+	bool charging;			/* charge enable bits applied */
 	/* serialize regmap access from irq thread + poll work */
 	struct mutex lock;
 };
 
 static const char *const z1_charger_psy_name = "usb"; /* std name so the A9 health HAL isPowered() sees the charger */
+
+static void z1_charger_apply(struct z1_charger *chg, bool online);
 
 static int z1_charger_read_online(struct z1_charger *chg, bool *online)
 {
@@ -118,6 +202,10 @@ static void z1_charger_update(struct z1_charger *chg)
 		return;
 	}
 
+	/* Charge policy + watchdog heartbeat ride on the same tick as the
+	 * detection update (2 s poll, or immediately on the CHRDET IRQ). */
+	z1_charger_apply(chg, online);
+
 	if (online != chg->online) {
 		dev_info(chg->dev, "charger %s (RGS_CHRDET CHR_CON0[5] -> %d)\n",
 			 online ? "plugged" : "unplugged", online);
@@ -131,6 +219,232 @@ static int z1_charger_read_vcdt_mv(struct z1_charger *chg, int *mv)
 	/* iio_read_channel_processed applies the provider scale: for the
 	 * mt6323 auxadc VCDT channel this is raw * 1800 mV / 2^15. */
 	return iio_read_channel_processed(chg->chan_vcdt, mv);
+}
+
+/* Vendor charging_hw_init() (charging_hw_pmic.c:532): watchdog armed,
+ * HW overvoltage 4.3 V, charger-input (VCDT) HV detect on, USBDL forced
+ * off, BC11 block reset, CSDAC/baton/low-current-debounce defaults. */
+static int z1_charger_hw_init(struct z1_charger *chg)
+{
+	struct regmap *map = chg->regmap;
+	int ret;
+
+	ret = regmap_update_bits(map, MT6323_CHR_CON13,
+				 Z1_CHR_CON13_CHRWDT_TD_MASK, 0);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON13,
+				  Z1_CHR_CON13_CHRWDT_EN | Z1_CHR_CON13_CHRWDT_WR,
+				  Z1_CHR_CON13_CHRWDT_EN | Z1_CHR_CON13_CHRWDT_WR);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON15,
+				  Z1_CHR_CON15_CHRWDT_INT_EN,
+				  Z1_CHR_CON15_CHRWDT_INT_EN);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON6,
+				  Z1_CHR_CON6_VBAT_OV_EN |
+				  (Z1_CHR_CON6_VBAT_OV_VTH_MASK <<
+				   Z1_CHR_CON6_VBAT_OV_VTH_SHIFT),
+				  Z1_CHR_CON6_VBAT_OV_EN |
+				  (Z1_VBAT_OV_VTH_4V3 <<
+				   Z1_CHR_CON6_VBAT_OV_VTH_SHIFT));
+	ret |= regmap_update_bits(map, MT6323_CHR_CON1,
+				  Z1_CHR_CON1_VCDT_HV_EN,
+				  Z1_CHR_CON1_VCDT_HV_EN);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON16,
+				  Z1_CHR_CON16_USBDL_SET |
+				  Z1_CHR_CON16_USBDL_RST,
+				  Z1_CHR_CON16_USBDL_RST);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON18,
+				  Z1_CHR_CON18_BC11_BB_CTRL |
+				  Z1_CHR_CON18_BC11_RST,
+				  Z1_CHR_CON18_BC11_BB_CTRL |
+				  Z1_CHR_CON18_BC11_RST);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON23,
+				  Z1_CHR_CON23_CSDAC_MODE |
+				  Z1_CHR_CON23_ULC_DET_EN,
+				  Z1_CHR_CON23_CSDAC_MODE |
+				  Z1_CHR_CON23_ULC_DET_EN);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON7,
+				  Z1_CHR_CON7_BATON_EN,
+				  Z1_CHR_CON7_BATON_EN);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON22,
+				  Z1_CHR_CON22_LOW_ICH_DB_MASK, 1);
+	if (ret)
+		dev_err(chg->dev, "charger hw_init regmap error: %d\n", ret);
+	return ret;
+}
+
+/* Vendor charging_enable() TRUE branch + CV/CC setpoints, bit for bit. */
+static int z1_charger_enable(struct z1_charger *chg)
+{
+	struct regmap *map = chg->regmap;
+	int ret;
+
+	ret = z1_charger_hw_init(chg);
+
+	ret |= regmap_update_bits(map, MT6323_CHR_CON21,
+				  Z1_CHR_CON21_CSDAC_DLY_MASK, 0x4);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON21,
+				  Z1_CHR_CON21_CSDAC_STP_MASK <<
+				  Z1_CHR_CON21_CSDAC_STP_SHIFT,
+				  0x1 << Z1_CHR_CON21_CSDAC_STP_SHIFT);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON20,
+				  Z1_CHR_CON20_CSDAC_STP_INC_MASK, 0x1);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON20,
+				  Z1_CHR_CON20_CSDAC_STP_DEC_MASK <<
+				  Z1_CHR_CON20_CSDAC_STP_DEC_SHIFT,
+				  0x2 << Z1_CHR_CON20_CSDAC_STP_DEC_SHIFT);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON2,
+				  Z1_CHR_CON2_CS_EN, Z1_CHR_CON2_CS_EN);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON23,
+				  Z1_CHR_CON23_HWCV_EN,
+				  Z1_CHR_CON23_HWCV_EN);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON2,
+				  Z1_CHR_CON2_VBAT_CV_EN,
+				  Z1_CHR_CON2_VBAT_CV_EN);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON3,
+				  Z1_CHR_CON3_VBAT_CV_VTH_MASK,
+				  Z1_CV_VTH_4V2);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON4,
+				  Z1_CHR_CON4_CS_VTH_MASK,
+				  Z1_CS_VTH_450MA);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON10,
+				  Z1_CHR_CON10_PCHR_FLAG_EN,
+				  Z1_CHR_CON10_PCHR_FLAG_EN);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON0,
+				  Z1_CHR_CON0_CSDAC_EN | Z1_CHR_CON0_CHR_EN,
+				  Z1_CHR_CON0_CSDAC_EN | Z1_CHR_CON0_CHR_EN);
+
+	if (ret) {
+		dev_err(chg->dev, "charge-enable sequence failed: %d\n", ret);
+		return ret;
+	}
+
+	/* Forensics: dump the state the hardware reports right after the
+	 * enable sequence (CHR_CON0 RGS bits + CSDAC DAC value). */
+	{
+		unsigned int c0, c8;
+
+		if (!regmap_read(map, MT6323_CHR_CON0, &c0) &&
+		    !regmap_read(map, MT6323_CHR_CON8, &c8))
+			dev_info(chg->dev,
+				 "charging ENABLED (CV 4.2V CC 450mA): CHR_CON0=0x%04x CHR_CON8(CSDAC)=0x%04x\n",
+				 c0, c8);
+	}
+	return 0;
+}
+
+/* Vendor charging_enable() FALSE branch.  Watchdog off too, so a stray
+ * partial enable cannot outlive this call. */
+static int z1_charger_disable(struct z1_charger *chg)
+{
+	struct regmap *map = chg->regmap;
+	int ret;
+
+	ret  = regmap_update_bits(map, MT6323_CHR_CON15,
+				  Z1_CHR_CON15_CHRWDT_INT_EN |
+				  Z1_CHR_CON15_CHRWDT_FLAG_WR, 0);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON13,
+				  Z1_CHR_CON13_CHRWDT_EN, 0);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON0,
+				  Z1_CHR_CON0_CSDAC_EN | Z1_CHR_CON0_CHR_EN, 0);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON23,
+				  Z1_CHR_CON23_HWCV_EN, 0);
+	if (ret)
+		dev_err(chg->dev, "charge-disable sequence failed: %d\n", ret);
+	else
+		dev_info(chg->dev, "charging DISABLED\n");
+	return ret;
+}
+
+/* Vendor charging_reset_watch_dog_timer(): re-arm the 4 s watchdog.  The
+ * poll work calls this every 2 s while charging. */
+static int z1_charger_feed_wdt(struct z1_charger *chg)
+{
+	struct regmap *map = chg->regmap;
+	int ret;
+
+	ret  = regmap_update_bits(map, MT6323_CHR_CON13,
+				  Z1_CHR_CON13_CHRWDT_TD_MASK, 0);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON13,
+				  Z1_CHR_CON13_CHRWDT_WR |
+				  Z1_CHR_CON13_CHRWDT_EN,
+				  Z1_CHR_CON13_CHRWDT_WR |
+				  Z1_CHR_CON13_CHRWDT_EN);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON15,
+				  Z1_CHR_CON15_CHRWDT_INT_EN,
+				  Z1_CHR_CON15_CHRWDT_INT_EN);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON15,
+				  Z1_CHR_CON15_CHRWDT_FLAG_WR,
+				  Z1_CHR_CON15_CHRWDT_FLAG_WR);
+	return ret;
+}
+
+/* Temperature gate against the battery psy.  Returns 1 if charging is
+ * allowed, 0 otherwise (missing psy, missing TEMP property, or out of
+ * 0..50 degC).  Missing/unreadable temperature is fail-safe: no charge. */
+static bool z1_charger_temp_ok(struct z1_charger *chg, int *temp)
+{
+	union power_supply_propval val;
+	int ret;
+
+	if (!chg->bat_psy)
+		return false;
+	ret = power_supply_get_property(chg->bat_psy,
+					POWER_SUPPLY_PROP_TEMP, &val);
+	if (ret)
+		return false;
+	*temp = val.intval;
+	return *temp >= Z1_TEMP_MIN && *temp <= Z1_TEMP_MAX;
+}
+
+/* Called with chg->lock held, once per poll tick (2 s).  Applies the
+ * charge policy: enable only with charger present AND battery temperature
+ * in window; re-feed the watchdog while charging; take the vendor disable
+ * path when the charger leaves or the gate says no. */
+static void z1_charger_apply(struct z1_charger *chg, bool online)
+{
+	int temp = INT_MIN;
+
+	if (!online) {
+		if (chg->charging) {
+			z1_charger_disable(chg);
+			chg->charging = false;
+		}
+		return;
+	}
+
+	if (!chg->bat_psy) {
+		chg->bat_psy = power_supply_get_by_name(Z1_BATTERY_PSY_NAME);
+		if (!chg->bat_psy)
+			return; /* battery driver not up yet: stay off */
+	}
+
+	if (!z1_charger_temp_ok(chg, &temp)) {
+		if (chg->charging) {
+			dev_warn(chg->dev,
+				 "battery temp %d (0.1C) out of gate, stopping charge\n",
+				 temp);
+			z1_charger_disable(chg);
+			chg->charging = false;
+		} else if (temp != INT_MIN) {
+			dev_warn_ratelimited(chg->dev,
+				 "battery temp %d (0.1C) out of gate, not charging\n",
+				 temp);
+		} else {
+			dev_dbg(chg->dev,
+				"battery temp unavailable, not charging\n");
+		}
+		return;
+	}
+
+	if (!chg->charging) {
+		if (!z1_charger_enable(chg))
+			chg->charging = true;
+		return;
+	}
+
+	/* Already enabled: heartbeat.  If the feed ever fails repeatedly
+	 * the 4 s watchdog cuts charging by itself (safe direction). */
+	if (z1_charger_feed_wdt(chg))
+		dev_err_ratelimited(chg->dev, "watchdog feed failed\n");
 }
 
 static int z1_charger_get_property(struct power_supply *psy,
@@ -315,15 +629,33 @@ static const struct of_device_id z1_charger_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, z1_charger_of_match);
 
+static void z1_charger_remove(struct platform_device *pdev)
+{
+	struct z1_charger *chg = platform_get_drvdata(pdev);
+
+	/* The devm-managed poll work is cancelled after .remove; stop it
+	 * here first so it cannot re-enable charging behind our back, then
+	 * take the vendor disable path.  If any of this never runs, the
+	 * still-armed 4 s watchdog cuts charging on its own. */
+	cancel_delayed_work_sync(&chg->poll_work);
+	mutex_lock(&chg->lock);
+	z1_charger_disable(chg);
+	chg->charging = false;
+	mutex_unlock(&chg->lock);
+	if (chg->bat_psy)
+		power_supply_put(chg->bat_psy);
+}
+
 static struct platform_driver z1_charger_driver = {
 	.driver = {
 		.name = "z1-charger",
 		.of_match_table = z1_charger_of_match,
 	},
 	.probe = z1_charger_probe,
+	.remove = z1_charger_remove,
 };
 module_platform_driver(z1_charger_driver);
 
 MODULE_AUTHOR("Z1 mainline bring-up");
-MODULE_DESCRIPTION("MT6323 USB charger detection (RGS_CHRDET) for Z1");
+MODULE_DESCRIPTION("MT6323 USB charger detect + charge enable (vendor-extracted register map) for Z1");
 MODULE_LICENSE("GPL");
