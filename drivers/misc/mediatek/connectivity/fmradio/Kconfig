@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-2.0
+# Standalone Kconfig for the vendored MT6572 CONSYS FM radio module.
+#
+# Deliberately NOT sourced by any parent Kconfig: this directory is an
+# external-module workspace (built with make M=drivers/misc/mediatek/
+# connectivity/fmradio), so in-tree config/menuconfig is untouched.  If a
+# future batch wants it inside the tree build, source this file from
+# drivers/misc/mediatek/Kconfig and add the obj hook — that is the only
+# wiring it needs.
+
+config MTK_CONNSYS_FM
+	tristate "MT6572 CONSYS FM radio (MT6627N RF front-end, /dev/fm)"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	help
+	  Forward-ported MediaTek conn_soc-family FM radio driver for the
+	  MT6572 on-die connectivity subsystem (CONSYS) with the external
+	  MT6627N RF transceiver.  Commands and RDS ride the WMT/STP control
+	  plane over BTIF (mtk_stp_wmt_soc.ko + mtk_btif_drv.ko must be
+	  loaded first); audio leaves CONSYS as FM-I2S into the AFE
+	  (mt6572-afe-pcm FM Playback Switch/Volume + AWB capture).
+	  Firmware: /lib/firmware/mt6627_fm_v*_{patch,coeff}.bin (stock
+	  Z1 files, archived in out/firmware_backup/firmware/mt6627/).
+
+	  Built from https://github.com/gabin8/mt6572-connsys-modules
+	  fmradio/ (module name mtk_fm_drv, char device /dev/fm).
+	  Say M if you have the CONNSYS stack; say N to omit.

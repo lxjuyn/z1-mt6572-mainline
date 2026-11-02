@@ -1,0 +1,30 @@
+# MT6572 CONSYS FM radio (MT6627 RF front-end) — mtk_fm_drv.ko
+#
+# Vendored 2026-11-02 from https://github.com/gabin8/mt6572-connsys-modules
+# (branch main, fmradio/ dir), adapted only in the -I paths: the five
+# upstream sibling header dirs are re-hosted verbatim under conn_soc_inc/.
+# Sources themselves are byte-identical to upstream; see PORTING_NOTES.md.
+#
+# Build (external module, kernel 7.0.0-rc7-z1+):
+#   make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
+#        M=drivers/misc/mediatek/connectivity/fmradio modules KBUILD_MODPOST_WARN=1
+#
+# Cross-module symbols (mtk_wcn_stp_*, mtk_wcn_wmt_*) resolve at insmod
+# time against mtk_stp_wmt_soc.ko (already deployed in the Z1 R4/R5
+# radio chain).  This dir is NOT referenced from any parent Makefile, so
+# in-tree full builds ignore it.
+
+ccflags-y += -DMT6627_FM -DCFG_FM_CONNAC2=0 -DWMT_IDC_SUPPORT=0
+ccflags-y += -I$(src)/inc -I$(src)/plat/inc -I$(src)/chips/mt6627/inc
+ccflags-y += -I$(src)/conn_soc_inc/conn_soc/include \
+	-I$(src)/conn_soc_inc/conn_soc/linux/include \
+	-I$(src)/conn_soc_inc/conn_soc/core/include \
+	-I$(src)/conn_soc_inc/compat_inc \
+	-I$(src)/conn_soc_inc/detect_inc
+
+obj-m += mtk_fm_drv.o
+mtk_fm_drv-objs := core/fm_module.o core/fm_main.o core/fm_config.o \
+	core/fm_rds_parser.o core/fm_patch.o core/fm_utils.o core/fm_link.o \
+	core/fm_eint.o core/fm_cmd.o core/fm_reg_utils.o \
+	chips/mt6627/pub/mt6627_fm_rds.o chips/mt6627/pub/mt6627_fm_lib.o \
+	plat/legacy_wmt.o
