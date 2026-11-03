@@ -34,7 +34,7 @@
 		 * console= wins /dev/console, so ttyS0 last gives the serial
 		 * port both the kernel log tail and the final console getty.
 		 */
-		bootargs = "console=ttyS0,921600n8 root=/dev/ram panic=10 loglevel=7 clk_ignore_unused regulator_ignore_unused oops=panic sysrq_always_enabled rdinit=/init earlycon=mtk8250,0x11005000 androidboot.hardware=z1 androidboot.selinux=permissive firmware_class.path=/system/etc/firmware printk.devkmsg=on";
+		bootargs = "console=ttyS0,921600n8 root=/dev/ram panic=10 loglevel=7 clk_ignore_unused regulator_ignore_unused pd_ignore_unused oops=panic sysrq_always_enabled rdinit=/init earlycon=mtk8250,0x11005000 androidboot.hardware=z1 androidboot.selinux=permissive firmware_class.path=/system/etc/firmware printk.devkmsg=on";
 		/*
 		 * Z1 LK relocates the MTK ROOTFS payload to 0x84100000.  Its
 		 * ATAG_INITRD2 handoff is not present at runtime, so provide the
@@ -80,7 +80,7 @@
 		 * (sha 1a2c5689...) and was never committed; this makes the
 		 * tree build byte-identical to it (out/R5C_VERIFY.md A.3/A.5).
 		 */
-		linux,initrd-end = <0x842e2c6a>;
+		linux,initrd-end = <0x842e3516>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
