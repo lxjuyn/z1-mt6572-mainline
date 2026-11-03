@@ -2,10 +2,12 @@
 /*
  * MediaTek MT6572 + MT6323 sound card.
  *
- * Machine driver binding the MT6572 AFE platform (DL1 playback) to the MT6323
- * PMIC analog codec, with headphone-jack detection that auto-routes between the
- * speaker and the headphones, and an optional external speaker amplifier. The
- * AFE's AWB capture (the FM receiver's stream) has no codec behind it.
+ * Machine driver binding the MT6572 AFE platform (DL1 playback, AWB capture)
+ * to the MT6323 PMIC analog codec, with headphone-jack detection that
+ * auto-routes between the speaker and the headphones, and an optional external
+ * speaker amplifier. The AWB capture link carries either the FM receiver's
+ * I2S input or the MT6323 mic uplink (hearing-aid loopback), selected by the
+ * AFE's "AWB Source" mux plus the codec's "MIC Route" switch.
  * Modelled on the mt8183-mt6358 PMIC-codec card.
  */
 
@@ -48,7 +50,7 @@ SND_SOC_DAILINK_DEFS(playback,
 
 SND_SOC_DAILINK_DEFS(awb,
 	DAILINK_COMP_ARRAY(COMP_CPU("mt6572-afe-awb")),
-	DAILINK_COMP_ARRAY(COMP_DUMMY()),
+	DAILINK_COMP_ARRAY(COMP_CODEC("mt6397codec", "mt6323-snd-codec-aif1")),
 	DAILINK_COMP_ARRAY(COMP_EMPTY()));
 
 static struct snd_soc_dai_link mt6572_mt6323_dai_links[] = {
@@ -131,7 +133,11 @@ static int mt6572_mt6323_soc_card_probe(struct mtk_soc_card_data *soc_card_data,
 			dai_link->codecs->of_node = codec_np;
 			dai_link->codecs->name = NULL;
 			dai_link->init = mt6572_mt6323_accdet_init;
-			break;
+		} else if (strcmp(dai_link->name, "AWB") == 0) {
+			/* the AWB capture link needs the codec DAI behind it so
+			 * DAPM can power the MIC uplink path when recording */
+			dai_link->codecs->of_node = codec_np;
+			dai_link->codecs->name = NULL;
 		}
 	}
 

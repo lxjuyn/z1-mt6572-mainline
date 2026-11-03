@@ -3,8 +3,9 @@
  * MediaTek MT6323 PMIC analog audio codec.
  *
  * The analog audio back-end (DAC, headphone driver, path to an external
- * speaker amp) of the MT6323 PMIC, reached over the parent mt6397 MFD pwrap
- * regmap. The SoC-side AFE and the sound card are separate drivers.
+ * speaker amp, and the MIC uplink: input mux, PGA, ADC, micbias) of the
+ * MT6323 PMIC, reached over the parent mt6397 MFD pwrap regmap. The SoC-side
+ * AFE and the sound card are separate drivers.
  */
 
 #include <linux/bits.h>
@@ -62,9 +63,46 @@
 #define ZCD_GAIN_CTL_MAX	0x12		/* control range = +8dB .. -10dB */
 #define ZCD_GAIN_REG(g)		(((g) << 7) | (g))
 
+/*
+ * Uplink (MIC capture) path, from the stock mt6572 audio HAL record flow:
+ * the ABB AFE bridge has a UL lane (CON0[1]) whose rate/format lives in
+ * CON1[4] and NEWIF_CFG2[11:10]; CON11[8] toggles a config-apply trigger.
+ * The AUDTOP block carries the mic analog: PGA + ADC per channel, the input
+ * mux in CON0[3:0]/CON1[7:4] (with the CON3 swap bits) and the micbias in
+ * CON8[3]. Values mirror AudioPlatformDevice/AudioMachineDevice AnalogOpen/
+ * Close(DEVICE_IN_ADC).
+ */
+#define ABB_AFE_CON0_UL_ON	BIT(1)
+#define ABB_AFE_CON1_UL_RATE	BIT(4)		/* set = 48 kHz UL, clear = below */
+#define ABB_AFE_CON11_TOP_TRIG	BIT(8)		/* config-apply trigger (toggle) */
+#define AUDTOP_CON0_L_VCM_MASK	0x7f80		/* LCH 1.4V/2.4V buffers + UL VCM */
+#define AUDTOP_CON0_L_VCM_ON	0x7800
+#define AUDTOP_CON0_L_VCM_OFF	0x6000		/* vendor close, downlink off */
+#define AUDTOP_CON0_L_MUX_MASK	0x000f		/* MIC1 = 0, MIC2 = 1, open = 3 */
+#define AUDTOP_CON0_L_MUX_OPEN	0x0003
+#define AUDTOP_CON0_L_PGA_MASK	0x0070
+#define AUDTOP_CON0_L_PGA_6DB	0x0020
+#define AUDTOP_CON0_L_ADC_MASK	0x0180		/* LCH ADC + PGA enable */
+#define AUDTOP_CON1_R_MUX_MASK	0x00f0		/* MIC2 = 0x10, MIC1 = 0x40, open = 0x20 */
+#define AUDTOP_CON1_R_MUX_OPEN	0x0020
+#define AUDTOP_CON1_R_PGA_MASK	0x0700
+#define AUDTOP_CON1_R_PGA_6DB	0x0200
+#define AUDTOP_CON2_R_VCM_MASK	0x00ff
+#define AUDTOP_CON2_R_VCM_ON	0x00f0
+#define AUDTOP_CON2_R_VCM_OFF	0x00c0
+#define AUDTOP_CON2_R_ADC_MASK	0x0003		/* RCH ADC + PGA enable */
+#define AUDTOP_CON3_R_SWAP	BIT(9)		/* feed MIC1 to the R channel */
+#define AUDTOP_CON8_MICBIAS	BIT(3)
+#define NEWIF_CFG2_UL_BASE	0x302f		/* UL up8x rxif ADC voice mode */
+#define NEWIF_CFG2_UL_RATE	GENMASK(11, 10)	/* 3 @48 kHz, 1 below */
+
 struct mt6323_codec_priv {
 	struct device *dev;
 	struct regmap *regmap;		/* borrowed from the parent MT6323 MFD */
+	unsigned int mic_mux;		/* "MIC Input Mux": 0 = MIC1, 1 = MIC2 */
+	unsigned int mic_rate;		/* capture sample rate, from .hw_params */
+	bool mic_pwr;			/* MIC UL analog currently powered */
+	bool dl_pwr;			/* downlink DAC currently powered */
 };
 
 /*
@@ -133,12 +171,12 @@ static int mt6323_newif_event(struct snd_soc_dapm_widget *w,
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
 		/* enable the ABB AFE bridge (CON0) and its clock/format config (CON11) */
-		regmap_write(priv->regmap, ABB_AFE_CON(0),  0x0001);
-		regmap_write(priv->regmap, ABB_AFE_CON(11), 0x0303);
+		regmap_update_bits(priv->regmap, ABB_AFE_CON(0),  0x0001, 0x0001);
+		regmap_update_bits(priv->regmap, ABB_AFE_CON(11), 0x0303, 0x0303);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
-		regmap_write(priv->regmap, ABB_AFE_CON(11), 0x0000);
-		regmap_write(priv->regmap, ABB_AFE_CON(0),  0x0000);
+		regmap_update_bits(priv->regmap, ABB_AFE_CON(11), 0x0303, 0x0000);
+		regmap_update_bits(priv->regmap, ABB_AFE_CON(0),  0x0001, 0x0000);
 		break;
 	}
 	return 0;
@@ -153,11 +191,14 @@ static int mt6323_dac_event(struct snd_soc_dapm_widget *w,
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
+		priv->dl_pwr = true;
 		regmap_write(priv->regmap, AUDTOP_CON(5), 0x0014);	/* DAC output level: stock plays here; old 0x7714 over-drove the speaker */
-		regmap_write(priv->regmap, AUDTOP_CON(0), 0x7010);	/* DAC enable */
+		/* scoped to the DAC's own bits: the UL mic path shares CON0 */
+		regmap_update_bits(priv->regmap, AUDTOP_CON(0), 0x7010, 0x7010);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
-		regmap_write(priv->regmap, AUDTOP_CON(0), 0x6010);	/* baseline */
+		priv->dl_pwr = false;
+		regmap_update_bits(priv->regmap, AUDTOP_CON(0), 0x7010, 0x6010);
 		regmap_write(priv->regmap, AUDTOP_CON(5), 0x0014);	/* baseline */
 		break;
 	}
@@ -264,6 +305,137 @@ static int mt6323_speaker_event(struct snd_soc_dapm_widget *w,
 
 #define AUDTOP_CON7_TEARDOWN_MASK	GENMASK(7, 4)
 
+/* Toggle the ABB top-control apply trigger (stock TopCtlChangeTrigger). */
+static void mt6323_top_trigger(struct mt6323_codec_priv *priv)
+{
+	unsigned int con11;
+
+	regmap_read(priv->regmap, ABB_AFE_CON(11), &con11);
+	regmap_update_bits(priv->regmap, ABB_AFE_CON(11), ABB_AFE_CON11_TOP_TRIG,
+			   (con11 & BIT(0)) ? 0 : ABB_AFE_CON11_TOP_TRIG);
+}
+
+/* Apply the mic input mux: L in AUDTOP_CON0[3:0], R follows via the swap bit */
+/* (vendor single-mic default: both channels take the same mic). */
+static void mt6323_mic_mux_apply(struct mt6323_codec_priv *priv)
+{
+	switch (priv->mic_mux) {
+	case 1:	/* MIC2 */
+		regmap_update_bits(priv->regmap, AUDTOP_CON(3), AUDTOP_CON3_R_SWAP, 0);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(0), AUDTOP_CON0_L_MUX_MASK, 0x0001);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(1), AUDTOP_CON1_R_MUX_MASK, 0x0010);
+		break;
+	default: /* MIC1 */
+		regmap_update_bits(priv->regmap, AUDTOP_CON(3), AUDTOP_CON3_R_SWAP,
+				   AUDTOP_CON3_R_SWAP);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(0), AUDTOP_CON0_L_MUX_MASK, 0x0000);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(1), AUDTOP_CON1_R_MUX_MASK, 0x0040);
+		break;
+	}
+}
+
+/*
+ * MIC uplink analog: PMIC UL interface + AUDTOP mic path (buffers, PGA, ADC,
+ * micbias), mirroring the stock HAL AnalogOpen/Close(DEVICE_IN_ADC). The
+ * input mux (MIC1/MIC2) is the "MIC Input Mux" control; the physical mic pin
+ * of the board is not known to the driver, so userspace can switch it.
+ */
+static int mt6323_mic_event(struct snd_soc_dapm_widget *w,
+			    struct snd_kcontrol *kcontrol, int event)
+{
+	struct mt6323_codec_priv *priv = snd_soc_component_get_drvdata(
+		snd_soc_dapm_to_component(w->dapm));
+	unsigned int ul_newif = (priv->mic_rate == 48000) ? 3 : 1;
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		/* PMIC UL digital interface (stock AnalogOpen DEVICE_IN_ADC) */
+		regmap_write(priv->regmap, ABB_AFE_PMIC_NEWIF_CFG2,
+			     NEWIF_CFG2_UL_BASE | (ul_newif << 10));
+		regmap_update_bits(priv->regmap, ABB_AFE_CON(1), ABB_AFE_CON1_UL_RATE,
+				   (priv->mic_rate == 48000) ? ABB_AFE_CON1_UL_RATE : 0);
+		mt6323_top_trigger(priv);
+		regmap_update_bits(priv->regmap, ABB_AFE_CON(0), ABB_AFE_CON0_UL_ON,
+				   ABB_AFE_CON0_UL_ON);
+
+		/* AUDTOP mic analog (stock AudioMachineDevice DEVICE_IN_ADC) */
+		regmap_update_bits(priv->regmap, AUDTOP_CON(0),
+				   AUDTOP_CON0_L_VCM_MASK, AUDTOP_CON0_L_VCM_ON);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(2),
+				   AUDTOP_CON2_R_VCM_MASK, AUDTOP_CON2_R_VCM_ON);
+		mt6323_mic_mux_apply(priv);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(1),
+				   AUDTOP_CON1_R_PGA_MASK, AUDTOP_CON1_R_PGA_6DB);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(0),
+				   AUDTOP_CON0_L_PGA_MASK, AUDTOP_CON0_L_PGA_6DB);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(8),
+				   AUDTOP_CON8_MICBIAS, AUDTOP_CON8_MICBIAS);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(0),
+				   AUDTOP_CON0_L_ADC_MASK, AUDTOP_CON0_L_ADC_MASK);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(2),
+				   AUDTOP_CON2_R_ADC_MASK, AUDTOP_CON2_R_ADC_MASK);
+		priv->mic_pwr = true;
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		regmap_update_bits(priv->regmap, AUDTOP_CON(0),
+				   AUDTOP_CON0_L_ADC_MASK, 0);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(2),
+				   AUDTOP_CON2_R_ADC_MASK, 0);
+		/* LCH VCM: drop 2.4V; keep the 1.4V rail while the DAC is on */
+		regmap_update_bits(priv->regmap, AUDTOP_CON(0),
+				   AUDTOP_CON0_L_VCM_MASK,
+				   priv->dl_pwr ? 0x7000 : AUDTOP_CON0_L_VCM_OFF);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(2),
+				   AUDTOP_CON2_R_VCM_MASK, AUDTOP_CON2_R_VCM_OFF);
+		/* back to the vendor's open-mux idle state */
+		regmap_update_bits(priv->regmap, AUDTOP_CON(3), AUDTOP_CON3_R_SWAP, 0);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(0),
+				   AUDTOP_CON0_L_MUX_MASK, AUDTOP_CON0_L_MUX_OPEN);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(1),
+				   AUDTOP_CON1_R_MUX_MASK, AUDTOP_CON1_R_MUX_OPEN);
+		regmap_update_bits(priv->regmap, AUDTOP_CON(8),
+				   AUDTOP_CON8_MICBIAS, 0);
+		regmap_update_bits(priv->regmap, ABB_AFE_CON(0), ABB_AFE_CON0_UL_ON, 0);
+		priv->mic_pwr = false;
+		break;
+	}
+	return 0;
+}
+
+static const char * const mt6323_mic_mux_texts[] = { "MIC1", "MIC2" };
+static const struct soc_enum mt6323_mic_mux_enum =
+	SOC_ENUM_SINGLE(SND_SOC_NOPM, 0, ARRAY_SIZE(mt6323_mic_mux_texts),
+			mt6323_mic_mux_texts);
+
+static int mt6323_mic_mux_get(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_value *ucontrol)
+{
+	struct mt6323_codec_priv *priv = snd_soc_component_get_drvdata(
+		snd_soc_dapm_kcontrol_to_component(kcontrol));
+
+	ucontrol->value.enumerated.item[0] = priv->mic_mux;
+	return 0;
+}
+
+static int mt6323_mic_mux_put(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_value *ucontrol)
+{
+	struct mt6323_codec_priv *priv = snd_soc_component_get_drvdata(
+		snd_soc_dapm_kcontrol_to_component(kcontrol));
+	unsigned int item = ucontrol->value.enumerated.item[0];
+
+	if (item > 1)
+		return -EINVAL;
+	if (item == priv->mic_mux)
+		return 0;
+	priv->mic_mux = item;
+	/* live re-route while the mic path is powered, else applied on power-up */
+	if (priv->mic_pwr)
+		mt6323_mic_mux_apply(priv);
+	return 1;
+}
+
+
 static int mt6323_earpiece_event(struct snd_soc_dapm_widget *w,
 				 struct snd_kcontrol *kcontrol, int event)
 {
@@ -314,9 +486,16 @@ static const struct snd_kcontrol_new spk_route_switch =
 static const struct snd_kcontrol_new earpiece_route_switch =
 	SOC_DAPM_SINGLE_VIRT("Switch", 1);
 
+static const struct snd_kcontrol_new mic_route_switch =
+	SOC_DAPM_SINGLE_VIRT("Switch", 1);
+
 static const struct snd_soc_dapm_widget mt6323_dapm_widgets[] = {
 	SND_SOC_DAPM_SWITCH("Speaker Route", SND_SOC_NOPM, 0, 0, &spk_route_switch),
 	SND_SOC_DAPM_SWITCH("Earpiece Route", SND_SOC_NOPM, 0, 0, &earpiece_route_switch),
+	SND_SOC_DAPM_INPUT("MIC Input"),
+	SND_SOC_DAPM_SWITCH("MIC Route", SND_SOC_NOPM, 0, 0, &mic_route_switch),
+	SND_SOC_DAPM_SUPPLY("MIC UL", SND_SOC_NOPM, 0, 0, mt6323_mic_event,
+			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 
 	SND_SOC_DAPM_SUPPLY("AUDCLK", SND_SOC_NOPM, 0, 0, mt6323_clk_event,
 			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
@@ -348,6 +527,10 @@ static const struct snd_soc_dapm_route mt6323_dapm_routes[] = {
 
 	{ "Earpiece Route", "Switch", "DAC" },
 	{ "Earpiece Driver", NULL, "Earpiece Route" },
+
+	{ "MIC Route", "Switch", "MIC Input" },
+	{ "MIC UL", NULL, "MIC Route" },
+	{ "AIF1 Capture", NULL, "MIC UL" },
 };
 
 /*
@@ -385,6 +568,8 @@ static const struct snd_kcontrol_new mt6323_snd_controls[] = {
 		       mt6323_dl_tlv),
 	SOC_SINGLE_TLV("Speaker Volume", SPK_CON(9), 8, 0x0f, 0, mt6323_spk_tlv),
 	SOC_SINGLE_TLV("Earpiece Volume", AUDTOP_CON(7), 4, 15, 0, mt6323_voice_tlv),
+	SOC_ENUM_EXT("MIC Input Mux", mt6323_mic_mux_enum,
+		     mt6323_mic_mux_get, mt6323_mic_mux_put),
 };
 
 static int mt6323_component_probe(struct snd_soc_component *component)
@@ -402,6 +587,18 @@ static int mt6323_component_probe(struct snd_soc_component *component)
 	return 0;
 }
 
+/* Remember the capture rate: the PMIC UL interface is rate-configured. */
+static int mt6323_hw_params(struct snd_soc_component *component,
+			    struct snd_pcm_substream *substream,
+			    struct snd_pcm_hw_params *params)
+{
+	struct mt6323_codec_priv *priv = snd_soc_component_get_drvdata(component);
+
+	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
+		priv->mic_rate = params_rate(params);
+	return 0;
+}
+
 static const struct snd_soc_component_driver mt6323_soc_component_driver = {
 	.probe			= mt6323_component_probe,
 	.controls		= mt6323_snd_controls,
@@ -410,6 +607,7 @@ static const struct snd_soc_component_driver mt6323_soc_component_driver = {
 	.num_dapm_widgets	= ARRAY_SIZE(mt6323_dapm_widgets),
 	.dapm_routes		= mt6323_dapm_routes,
 	.num_dapm_routes	= ARRAY_SIZE(mt6323_dapm_routes),
+	.hw_params		= mt6323_hw_params,
 	.endianness		= 1,
 };
 
@@ -418,6 +616,13 @@ static struct snd_soc_dai_driver mt6323_dai_driver[] = {
 		.name = "mt6323-snd-codec-aif1",
 		.playback = {
 			.stream_name = "AIF1 Playback",
+			.channels_min = 1,
+			.channels_max = 2,
+			.rates = MT6323_CODEC_RATES,
+			.formats = MT6323_CODEC_FORMATS,
+		},
+		.capture = {
+			.stream_name = "AIF1 Capture",
 			.channels_min = 1,
 			.channels_max = 2,
 			.rates = MT6323_CODEC_RATES,
@@ -440,7 +645,8 @@ static int mt6323_codec_probe(struct platform_device *pdev)
 	priv->regmap = mt6397->regmap;
 	if (IS_ERR(priv->regmap))
 		return PTR_ERR(priv->regmap);
-
+	priv->mic_mux = 0;		/* MIC1, the vendor single-mic default */
+	priv->mic_rate = 48000;
 	platform_set_drvdata(pdev, priv);
 
 	/* Analog + NEWIF idle baseline; DAPM powers the output path per-stream. */
