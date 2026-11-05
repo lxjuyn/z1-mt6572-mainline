@@ -80,7 +80,7 @@
 		 * (sha 1a2c5689...) and was never committed; this makes the
 		 * tree build byte-identical to it (out/R5C_VERIFY.md A.3/A.5).
 		 */
-		linux,initrd-end = <0x842e3516>;
+		linux,initrd-end = <0x842e3db8>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
@@ -393,13 +393,28 @@
 		io-channel-names = "voltage", "temperature";
 		monitored-battery = <&battery_data>;
 		/*
-		 * Real supplier link: the power_supply core resolves this
-		 * (fwnode_find_reference, power_supply_core.c) and gab_work's
-		 * power_supply_am_i_supplied() then returns 1 when the "usb"
-		 * psy reports online=1 -- without it the battery reported
-		 * CHARGING forever (board-verified fiction).
+		 * 2026-11-05: power-supplies = <&z1_charger> REMOVED.
+		 *
+		 * Board evidence: the battery node never registered at all --
+		 *   [36.982897] platform battery: deferred probe pending:
+		 *               generic-adc-battery: Failed to register
+		 *               power-supply device
+		 *   [28.279511] healthd: No battery devices found
+		 *   -> Android showed a permanent 0% battery.
+		 *
+		 * Why: power_supply_check_supplies() -> power_supply_find_
+		 * supply_from_fwnode() compares the referenced fwnode against every
+		 * registered psy's dev.fwnode.  The charger cell is instantiated by
+		 * mt6397-core.c via devm_mfd_add_devices() with of_compatible, which
+		 * sets the child platform device's of_node but not its fwnode, so the
+		 * comparison can never match and the battery defers forever.
+		 *
+		 * Dropping the link lets the meter register and report real
+		 * voltage/capacity (the health HAL's isPowered() still comes from the
+		 * "usb" psy's online=1, which works).  Cost: status will not report
+		 * CHARGING.  Proper fix later: make the MFD cell carry the fwnode
+		 * (device_set_node() in mt6397-core.c) and restore this line.
 		 */
-		power-supplies = <&z1_charger>;
 		/*
 		 * Generic Li-ion open-circuit discharge curve (uV, %),
 		 * voltage descending. TBC against the real Z1 pack; adjust
