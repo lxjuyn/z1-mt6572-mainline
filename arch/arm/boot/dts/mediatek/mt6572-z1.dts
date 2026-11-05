@@ -88,7 +88,7 @@
 		 * body = 1,981,410 B = 0x1e3be2，故 end = 0x842e3be2。
 		 * 每次换 ramdisk 都必须重算这里，否则 initrd 会被截断。
 		 */
-		linux,initrd-end = <0x842e3be2>;
+		linux,initrd-end = <0x842e3c5c>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
