@@ -696,6 +696,18 @@
 		};
 	};
 
+	/*
+	 * PMIC interrupt line: GPIO7 muxed to PMIC_EINT (EINT 16).
+	 * See the &pmic override below for why this matters.
+	 */
+	pmic_eint_pins: pmic-eint-pins {
+		pins {
+			pinmux = <MT6572_PIN_7_PMIC_EINT__FUNC_PMIC_EINT>;
+			input-enable;
+			bias-pull-up;
+		};
+	};
+
 	i2c1_pins: i2c1-pins {
 		pins {
 			pinmux = <MT6572_PIN_113_SCL_1_0__FUNC_SCL_1_0>,
@@ -747,6 +759,33 @@
 			bias-pull-up;
 		};
 	};
+};
+
+/*
+ * PMIC interrupt.  mt6323.dtsi carries interrupts = <150 IRQ_TYPE_LEVEL_HIGH>,
+ * a value inherited from the MT6397/MT8173 world where 150 is a GPIO number
+ * with EINT support.  On MT6572 that number is meaningless: pin 150 is
+ * MTK_EINT_FUNCTION(NO_EINT_SUPPORT, NO_EINT_SUPPORT) in
+ * pinctrl-mtk-mt6572.h, so mtk_xt_get_gpio_n() returns EINT_NA, the EINT
+ * request_resources hook returns -EINVAL and devm_request_threaded_irq()
+ * fails.  That is exactly what the board logged:
+ *   "failed to register irq=37; err: -22"
+ * and it left the power key, the headset (accdet) interrupt, the charger
+ * interrupt and the RTC alarm all dead, because every one of them is a child
+ * of this irq domain.
+ *
+ * The real mapping is GPIO7 -> function PMIC_EINT with EINT number 16
+ * (pinctrl-mtk-mt6572.h: MT6572_PIN(7, "GPIO7", MTK_EINT_FUNCTION(1, 16), ...,
+ * MTK_FUNCTION(1, "PMIC_EINT"))).  The PMIC interrupt output is open drain and
+ * active low, so the trigger is LEVEL_LOW.  If that is ever wrong the driver
+ * masks the parent IRQ after 64 empty entries instead of storming (see
+ * mt6397_irq_thread()), so a bad guess degrades to today's behaviour.
+ */
+&pmic {
+	interrupt-parent = <&pio>;
+	interrupts = <16 IRQ_TYPE_LEVEL_LOW>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&pmic_eint_pins>;
 };
 
 &keyboard {

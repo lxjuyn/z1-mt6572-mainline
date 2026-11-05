@@ -81,37 +81,69 @@ static struct irq_chip mt6397_irq_chip = {
 	.irq_set_wake = pm_sleep_ptr(mt6397_irq_set_wake),
 };
 
-static void mt6397_irq_handle_reg(struct mt6397_chip *mt6397, int reg,
-				  int irqbase)
+static int mt6397_irq_handle_reg(struct mt6397_chip *mt6397, int reg,
+				 int irqbase)
 {
 	unsigned int status = 0;
-	int i, irq, ret;
+	int i, irq, ret, handled = 0;
 
 	ret = regmap_read(mt6397->regmap, reg, &status);
 	if (ret) {
 		dev_err(mt6397->dev, "Failed to read irq status: %d\n", ret);
-		return;
+		return 0;
 	}
 
 	for (i = 0; i < 16; i++) {
 		if (status & BIT(i)) {
 			irq = irq_find_mapping(mt6397->irq_domain, irqbase + i);
-			if (irq)
+			if (irq) {
 				handle_nested_irq(irq);
+				handled++;
+			}
 		}
 	}
 
 	regmap_write(mt6397->regmap, reg, status);
+	return handled;
 }
+
+/*
+ * Z1: storm guard for the PMIC parent EINT.
+ *
+ * The MT6323 interrupt line is requested from the mt6572 EINT controller.  If
+ * the DT trigger type does not match the line's real electrical behaviour
+ * (level vs edge, polarity), the handler is entered with no PMIC status bit
+ * set, and for a level-triggered mismatch it is re-entered forever -- a storm
+ * that hangs the device.  The polarity cannot be verified without hardware,
+ * so count consecutive entries that handled nothing and mask the parent IRQ
+ * instead of letting a wrong guess lock the machine.  A bad guess then
+ * degrades to "PMIC interrupts do not work", which is the state before the
+ * EINT-number fix anyway.
+ */
+static unsigned int z1_pmic_irq_empty_streak;
 
 static irqreturn_t mt6397_irq_thread(int irq, void *data)
 {
 	struct mt6397_chip *mt6397 = data;
+	int handled;
 
-	mt6397_irq_handle_reg(mt6397, mt6397->int_status[0], 0);
-	mt6397_irq_handle_reg(mt6397, mt6397->int_status[1], 16);
+	handled  = mt6397_irq_handle_reg(mt6397, mt6397->int_status[0], 0);
+	handled += mt6397_irq_handle_reg(mt6397, mt6397->int_status[1], 16);
 	if (mt6397->int_status[2])
-		mt6397_irq_handle_reg(mt6397, mt6397->int_status[2], 32);
+		handled += mt6397_irq_handle_reg(mt6397, mt6397->int_status[2], 32);
+
+	if (handled) {
+		z1_pmic_irq_empty_streak = 0;
+		return IRQ_HANDLED;
+	}
+
+	if (++z1_pmic_irq_empty_streak >= 64) {
+		dev_err(mt6397->dev,
+			"PMIC IRQ entered %u times with no status bit set; masking the parent IRQ. Check the DT EINT trigger type (level/polarity).\n",
+			z1_pmic_irq_empty_streak);
+		disable_irq_nosync(irq);
+		z1_pmic_irq_empty_streak = 0;
+	}
 
 	return IRQ_HANDLED;
 }
