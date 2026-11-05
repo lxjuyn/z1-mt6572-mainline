@@ -80,7 +80,7 @@
 		 * (sha 1a2c5689...) and was never committed; this makes the
 		 * tree build byte-identical to it (out/R5C_VERIFY.md A.3/A.5).
 		 */
-		linux,initrd-end = <0x842e3fd2>;
+		linux,initrd-end = <0x842e3fe9>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
