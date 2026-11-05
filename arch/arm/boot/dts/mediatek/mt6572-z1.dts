@@ -80,7 +80,15 @@
 		 * (sha 1a2c5689...) and was never committed; this makes the
 		 * tree build byte-identical to it (out/R5C_VERIFY.md A.3/A.5).
 		 */
-		linux,initrd-end = <0x842e40e9>;
+		/*
+		 * 2026-11-05 resync: fix3j/fix3k 的 ramdisk 里那个 z1_cst836u.ko
+		 * 是旧构建（反汇编确认缺 input_dev->propbit |= INPUT_PROP_DIRECT
+		 * 那三条指令 —— `orr r3,r3,#2 / str [r2,#20]` 在 input_register_device
+		 * 之前），源码 2026-11-04 已修但没进 ramdisk。重打 ramdisk 后
+		 * body = 1,981,410 B = 0x1e3be2，故 end = 0x842e3be2。
+		 * 每次换 ramdisk 都必须重算这里，否则 initrd 会被截断。
+		 */
+		linux,initrd-end = <0x842e3be2>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {

@@ -121,6 +121,7 @@
 #define Z1_CHR_CON6_VBAT_OV_VTH_MASK	0x7	/* [3:1], 1 = 4.3 V */
 #define Z1_CHR_CON6_VBAT_OV_VTH_SHIFT	1
 #define Z1_CHR_CON7_BATON_EN		BIT(0)
+#define Z1_CHR_CON7_BATON_HT_EN		BIT(1)	/* vendor writes 0 */
 #define Z1_CHR_CON10_PCHR_FLAG_EN	BIT(4)
 #define Z1_CHR_CON13_CHRWDT_TD_MASK	0xf	/* [3:0], 0 = 4 s */
 #define Z1_CHR_CON13_CHRWDT_EN		BIT(4)
@@ -138,6 +139,7 @@
 #define Z1_CHR_CON21_CSDAC_STP_MASK	0x7	/* [6:4] */
 #define Z1_CHR_CON21_CSDAC_STP_SHIFT	4
 #define Z1_CHR_CON22_LOW_ICH_DB_MASK	0x3f	/* [5:0] */
+#define Z1_CHR_CON23_VCDT_MODE		BIT(1)	/* vendor writes 0 */
 #define Z1_CHR_CON23_CSDAC_MODE		BIT(2)
 #define Z1_CHR_CON23_HWCV_EN		BIT(6)
 #define Z1_CHR_CON23_ULC_DET_EN		BIT(7)
@@ -257,6 +259,14 @@ static int z1_charger_hw_init(struct z1_charger *chg)
 	ret |= regmap_update_bits(map, MT6323_CHR_CON15,
 				  Z1_CHR_CON15_CHRWDT_INT_EN,
 				  Z1_CHR_CON15_CHRWDT_INT_EN);
+	/* Clear a latched charge-watchdog flag.  LK arms the same 4 s
+	 * watchdog in its power-off-charging path; by the time Linux
+	 * probes (~20 s later) it has long expired and the PMIC can
+	 * refuse CHR_EN until the flag is cleared.  The vendor
+	 * charging_reset_watch_dog_timer() writes this every time. */
+	ret |= regmap_update_bits(map, MT6323_CHR_CON15,
+				  Z1_CHR_CON15_CHRWDT_FLAG_WR,
+				  Z1_CHR_CON15_CHRWDT_FLAG_WR);
 	ret |= regmap_update_bits(map, MT6323_CHR_CON6,
 				  Z1_CHR_CON6_VBAT_OV_EN |
 				  (Z1_CHR_CON6_VBAT_OV_VTH_MASK <<
@@ -281,9 +291,14 @@ static int z1_charger_hw_init(struct z1_charger *chg)
 				  Z1_CHR_CON23_ULC_DET_EN,
 				  Z1_CHR_CON23_CSDAC_MODE |
 				  Z1_CHR_CON23_ULC_DET_EN);
+	/* Vendor hw_init also clears these two; we never wrote them. */
+	ret |= regmap_update_bits(map, MT6323_CHR_CON23,
+				  Z1_CHR_CON23_VCDT_MODE, 0);
 	ret |= regmap_update_bits(map, MT6323_CHR_CON7,
 				  Z1_CHR_CON7_BATON_EN,
 				  Z1_CHR_CON7_BATON_EN);
+	ret |= regmap_update_bits(map, MT6323_CHR_CON7,
+				  Z1_CHR_CON7_BATON_HT_EN, 0);
 	ret |= regmap_update_bits(map, MT6323_CHR_CON22,
 				  Z1_CHR_CON22_LOW_ICH_DB_MASK, 1);
 	if (ret)
@@ -295,7 +310,8 @@ static int z1_charger_hw_init(struct z1_charger *chg)
 static int z1_charger_enable(struct z1_charger *chg)
 {
 	struct regmap *map = chg->regmap;
-	int ret;
+	unsigned int c0 = 0, c8;
+	int i, ret;
 
 	ret = z1_charger_hw_init(chg);
 
@@ -337,17 +353,54 @@ static int z1_charger_enable(struct z1_charger *chg)
 		return ret;
 	}
 
-	/* Forensics: dump the state the hardware reports right after the
-	 * enable sequence (CHR_CON0 RGS bits + CSDAC DAC value). */
-	{
-		unsigned int c0, c8;
-
+	/* VERIFY the master enable bit instead of merely printing it.
+	 * Board logs 2026-11-05 showed this exact sequence returning 0 from
+	 * every regmap call while CHR_CON0 still read 0x006b (bit4 CHR_EN
+	 * clear) and CSDAC stayed 0 -- i.e. the driver claimed "charging
+	 * ENABLED" while the hardware was not charging.  The old code only
+	 * dumped the value and could never notice.  Retry the master write a
+	 * few times, then fail loudly so the 2 s poll re-runs the whole
+	 * sequence instead of latching chg->charging = true forever. */
+	for (i = 0; i < 3; i++) {
 		if (!regmap_read(map, MT6323_CHR_CON0, &c0) &&
-		    !regmap_read(map, MT6323_CHR_CON8, &c8))
-			dev_info(chg->dev,
-				 "charging ENABLED (CV 4.2V CC 450mA): CHR_CON0=0x%04x CHR_CON8(CSDAC)=0x%04x\n",
-				 c0, c8);
+		    (c0 & Z1_CHR_CON0_CHR_EN))
+			break;
+		dev_warn_ratelimited(chg->dev,
+				     "CHR_EN did not stick (CHR_CON0=0x%04x), retry %d\n",
+				     c0, i + 1);
+		ret |= regmap_update_bits(map, MT6323_CHR_CON0,
+					  Z1_CHR_CON0_CSDAC_EN |
+					  Z1_CHR_CON0_CHR_EN,
+					  Z1_CHR_CON0_CSDAC_EN |
+					  Z1_CHR_CON0_CHR_EN);
 	}
+
+	if (ret || !(c0 & Z1_CHR_CON0_CHR_EN)) {
+		dev_err_ratelimited(chg->dev,
+			"charge enable FAILED: CHR_EN never set (CHR_CON0=0x%04x, ret=%d)\n",
+			c0, ret);
+		/* One-shot full dump of the charger block, vendor loop
+		 * (charging_hw_pmic.c:585-597): CON0..CON29 step 2.  This
+		 * is the evidence the next boot needs to tell "pwrap write
+		 * dropped" from "PMIC refuses CHR_EN". */
+		{
+			unsigned int v;
+			int r;
+
+			for (r = 0; r <= 0x2e; r += 2) {
+				if (!regmap_read(map, r, &v))
+					dev_err_once(chg->dev,
+						"CHR_CON%d(0x%04x)=0x%04x\n",
+						r, r, v);
+			}
+		}
+		return -EIO;
+	}
+
+	if (!regmap_read(map, MT6323_CHR_CON8, &c8))
+		dev_info(chg->dev,
+			 "charging ENABLED (CV 4.2V CC 450mA): CHR_CON0=0x%04x CHR_CON8(CSDAC)=0x%04x\n",
+			 c0, c8);
 	return 0;
 }
 
