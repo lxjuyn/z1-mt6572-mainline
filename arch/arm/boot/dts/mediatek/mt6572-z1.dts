@@ -510,7 +510,7 @@
 &pmic {
 	pinctrl-0 = <&pmic_int_pins>;
 	pinctrl-names = "default";
-	interrupts-extended = <&pio 7 IRQ_TYPE_LEVEL_HIGH>;
+	interrupts-extended = <&pio 16 IRQ_TYPE_LEVEL_LOW>;
 	status = "okay";
 
 	/*
@@ -683,7 +683,8 @@
 		pins {
 			pinmux = <MT6572_PIN_7_PMIC_EINT__FUNC_PMIC_EINT>;
 			input-enable;
-			bias-pull-down;
+			/* PMIC 中断是开漏低有效: 空闲时由外部/内部上拉拉高, 不能下拉 */
+			bias-pull-up;
 		};
 	};
 
@@ -762,31 +763,24 @@
 };
 
 /*
- * PMIC interrupt.  mt6323.dtsi carries interrupts = <150 IRQ_TYPE_LEVEL_HIGH>,
- * a value inherited from the MT6397/MT8173 world where 150 is a GPIO number
- * with EINT support.  On MT6572 that number is meaningless: pin 150 is
- * MTK_EINT_FUNCTION(NO_EINT_SUPPORT, NO_EINT_SUPPORT) in
- * pinctrl-mtk-mt6572.h, so mtk_xt_get_gpio_n() returns EINT_NA, the EINT
- * request_resources hook returns -EINVAL and devm_request_threaded_irq()
- * fails.  That is exactly what the board logged:
- *   "failed to register irq=37; err: -22"
- * and it left the power key, the headset (accdet) interrupt, the charger
- * interrupt and the RTC alarm all dead, because every one of them is a child
- * of this irq domain.
+ * PMIC 中断（2026-11-08 更正根因）:
  *
- * The real mapping is GPIO7 -> function PMIC_EINT with EINT number 16
- * (pinctrl-mtk-mt6572.h: MT6572_PIN(7, "GPIO7", MTK_EINT_FUNCTION(1, 16), ...,
- * MTK_FUNCTION(1, "PMIC_EINT"))).  The PMIC interrupt output is open drain and
- * active low, so the trigger is LEVEL_LOW.  If that is ever wrong the driver
- * masks the parent IRQ after 64 empty entries instead of storming (see
- * mt6397_irq_thread()), so a bad guess degrades to today's behaviour.
+ * 这里**真正生效的属性是 `&pmic` 节点里的 interrupts-extended**，
+ * 不是 mt6323.dtsi 里的 interrupt-parent/interrupts。
+ * of_irq_parse_one() 先试 extended 形式，只有它不存在时才回退到
+ * interrupt-parent+interrupts（drivers/of/irq.c）。所以：
+ *   - mt6323.dtsi 的 <150 ...>          —— 从未被解析（死代码）
+ *   - 我 11-05 加的 interrupts=<16 ...> —— 同样被屏蔽（死代码）
+ *   - 板上实际用的是 interrupts-extended = <&pio 7 ...>，即 **GPIO 号 7**，
+ *     而 pio 的中断域是 MT6572 EINT 控制器（ap_num=26，hwirq 是 EINT 号），
+ *     mtk_xt_get_gpio_n(7) 在引脚表里找不到 eint_n==7 的引脚
+ *     -> EINT_NA -> request_resources 返回 -EINVAL -> "Can not find pin"。
+ *     这也解释了为什么改 150->16 后 irq 号仍是 37、报错一模一样：那两个值根本没进内核。
+ *
+ * 正确值：GPIO7 的 PMIC_EINT 功能对应 **EINT 16**
+ * (pinctrl-mtk-mt6572.h: MTK_EINT_FUNCTION(1, 16))，中断线开漏低有效 => LEVEL_LOW。
+ * 已就地改成 interrupts-extended = <&pio 16 IRQ_TYPE_LEVEL_LOW>。
  */
-&pmic {
-	interrupt-parent = <&pio>;
-	interrupts = <16 IRQ_TYPE_LEVEL_LOW>;
-	pinctrl-names = "default";
-	pinctrl-0 = <&pmic_eint_pins>;
-};
 
 &keyboard {
 	status = "okay";
