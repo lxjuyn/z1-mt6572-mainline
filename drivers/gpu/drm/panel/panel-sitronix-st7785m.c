@@ -339,7 +339,15 @@ static const struct drm_display_mode st7785m_mode = {
 static const struct st7785m_panel_desc st7785m_desc = {
 	.mode		= &st7785m_mode,
 	.lanes		= 1,
-	.format		= MIPI_DSI_FMT_RGB565,
+	/*
+	 * Z1 (v58): the panel is initialised with COLMOD = 0x06, i.e. RGB666.
+	 * Verified in the device's own bootloader: the LK init table at
+	 * lk.bin 0x396D0 contains {0x3A, 0x06}.  Configured as RGB565 the DSI
+	 * sent 16-bit pixels to a panel told to expect 24-bit ones, which is why
+	 * the screen stayed black (and why LK's data rate is ~140 Mbps while
+	 * ours computed 96.4 Mbps).
+	 */
+	.format		= MIPI_DSI_FMT_RGB666,
 	/*
 	 * LK programmed DSI video mode (mode = 2). On mtk_dsi this maps to
 	 * burst video mode; DCS commands are issued in low-power mode.

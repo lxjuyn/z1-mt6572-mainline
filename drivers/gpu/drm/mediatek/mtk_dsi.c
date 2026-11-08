@@ -139,9 +139,17 @@
 #define CLK_HS_POST			GENMASK(15, 8)
 #define CLK_HS_EXIT			GENMASK(23, 16)
 
-/* DSI_VM_CMD_CON */
+/* DSI_VM_CMD_CON (vendor dsi_reg.h: bit0 EN, bit1 LONG_PKT, bit2 TIME_SEL,
+ * bit3..5 TS_*_EN, bit8..15 CM_DATA_ID, bit16..23 CM_DATA_0, bit24..31 CM_DATA_1) */
 #define VM_CMD_EN			BIT(0)
+#define VM_CMD_LONG_PKT			BIT(1)
 #define TS_VFP_EN			BIT(5)
+#define VM_CMD_CM_DATA_ID_SHIFT		8
+#define VM_CMD_CM_DATA_0_SHIFT		16
+#define VM_CMD_CM_DATA_1_SHIFT		24
+#define DSI_VM_CMD_DATA_OFF(off)	((off) + 4)	/* 0x134 */
+#define DSI_START_VM_CMD_START		BIT(16)
+#define VM_CMD_DONE_INT_FLAG		BIT(5)
 
 /* DSI_SHADOW_DEBUG */
 #define FORCE_COMMIT			BIT(0)
@@ -194,6 +202,7 @@ struct mtk_dsi_driver_data {
 	bool has_size_ctl;
 	bool cmdq_long_packet_ctl;
 	bool support_per_frame_lp;
+	bool mt6572_mipi_tx;	/* Z1: use the vendor MIPI-TX register map */
 };
 
 struct mtk_dsi {
@@ -662,8 +671,56 @@ static irqreturn_t mtk_dsi_irq(int irq, void *dev_id)
 
 static s32 mtk_dsi_switch_to_cmd_mode(struct mtk_dsi *dsi, u8 irq_flag, u32 t)
 {
+	struct device *dev = dsi->host.dev;
+	u32 before, after;
+
+	before = readl(dsi->regs + DSI_MODE_CTRL);
 	mtk_dsi_irq_data_clear(dsi, irq_flag);
 	mtk_dsi_set_cmd_mode(dsi);
+	/*
+	 * Z1: LK hands us a DSI that has been streaming BURST video mode, so
+	 * DSI_BUSY (INTSTA bit31) stays latched and no DCS command ever
+	 * completes.  Cycle the engine through reset (EN off -> RESET -> EN on)
+	 * before using the command channel, which is what the vendor
+	 * dsi_drv.c does before switching modes.
+	 */
+	mtk_dsi_disable(dsi);
+	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_RESET, DSI_RESET);
+	udelay(20);
+	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_RESET, 0);
+	mtk_dsi_enable(dsi);
+	after = readl(dsi->regs + DSI_MODE_CTRL);
+
+	/*
+	 * Z1 (route A): the vendor dsi_drv.c does not wait for VM_DONE here.
+	 * It simply polls DSI_INTSTA.BUSY (bit31) until the engine is idle and
+	 * resets it if it stays busy.  Waiting for the VM_DONE interrupt is
+	 * what made every DCS transfer fail with -ETIME on this IP.
+	 */
+	{
+		int i;
+		for (i = 0; i < 200; i++) {
+			if (!(readl(dsi->regs + DSI_INTSTA) & DSI_BUSY)) {
+				writel(0, dsi->regs + DSI_INTSTA);
+				return 0;
+			}
+			usleep_range(1000, 2000);
+		}
+	}
+
+	/* Z1: if the write to MODE_CTRL does not stick, this DSI IP does not
+	 * use the MT2701 register map and nothing we program will ever reach
+	 * the hardware. */
+	dev_info(dev, "Z1DSI: cmd_mode before=%08x after=%08x START=%08x CON=%08x TXRX=%08x INTSTA=%08x\n",
+		 before, after, readl(dsi->regs + DSI_START),
+		 readl(dsi->regs + DSI_CON_CTRL), readl(dsi->regs + DSI_TXRX_CTRL),
+		 readl(dsi->regs + DSI_INTSTA));
+	dev_info(dev, "Z1DSI: after reset INTSTA=%08x CON=%08x\n",
+		 readl(dsi->regs + DSI_INTSTA), readl(dsi->regs + DSI_CON_CTRL));
+	dev_info(dev, "Z1DSI: clk engine=%lu digital=%lu hs=%lu\n",
+		 (unsigned long)clk_get_rate(dsi->engine_clk),
+		 (unsigned long)clk_get_rate(dsi->digital_clk),
+		 (unsigned long)clk_get_rate(dsi->hs_clk));
 
 	if (!mtk_dsi_wait_for_irq_done(dsi, irq_flag, t)) {
 		DRM_ERROR("failed to switch cmd mode\n");
@@ -671,6 +728,142 @@ static s32 mtk_dsi_switch_to_cmd_mode(struct mtk_dsi *dsi, u8 irq_flag, u32 t)
 	} else {
 		return 0;
 	}
+}
+
+/* ------------------------------------------------------------------ *
+ * Z1: MT6572 MIPI-TX (D-PHY + PLL)
+ *
+ * The generic phy-mtk-mipi-dsi driver programs the MT2701 register map,
+ * whose PLL block sits at different offsets than this SoC's.  Measured on
+ * the board: lane registers (0x00..0x10) get programmed, everything from
+ * 0x14 up stays 0 -- and the PLL never produces a clock, so the DSI engine
+ * stays BUSY forever and no DCS command completes.
+ *
+ * The sequence below is transcribed from the MediaTek vendor kernel for the
+ * same DSI IP (anthropic: mt6582 dsi_drv.c:DSI_PHY_clk_setting()), with the
+ * register map from dsi_reg.h: lanes 0x00..0x14, TOP_CON 0x40, BG_CON 0x44,
+ * PLL_CON0..3 0x50..0x5c, PLL_CHG 0x60, PLL_TOP 0x64, PLL_PWR 0x68.
+ * ------------------------------------------------------------------ */
+#define MT6572_MIPI_TX_BASE	0x10011000
+
+#define MTX_DSI0_CON		0x00
+#define MTX_CLOCK_LANE		0x04
+#define MTX_DATA_LANE0		0x08
+#define MTX_TOP_CON		0x40
+#define MTX_BG_CON		0x44
+#define MTX_PLL_CON0		0x50
+#define MTX_PLL_CON1		0x54
+#define MTX_PLL_CON2		0x58
+#define MTX_PLL_CON3		0x5c
+#define MTX_PLL_TOP		0x64
+#define MTX_PLL_PWR		0x68
+
+static void mtx_set(void __iomem *tx, u32 off, u32 mask, u32 val)
+{
+	u32 v = readl(tx + off);
+
+	v = (v & ~mask) | ((val << __ffs(mask)) & mask);
+	writel(v, tx + off);
+}
+
+static void mtk_dsi_mt6572_mipi_tx_init(struct mtk_dsi *dsi)
+{
+	void __iomem *tx = ioremap(MT6572_MIPI_TX_BASE, 0x100);
+	u64 data_rate_mbps = div_u64(dsi->data_rate, 1000000);
+	u32 txdiv, pcw, frac;
+
+	if (!tx) {
+		dev_err(dsi->host.dev, "Z1DSI: cannot map MIPI TX\n");
+		return;
+	}
+
+	/* bias / impedance */
+	mtx_set(tx, MTX_TOP_CON, GENMASK(7, 4), 8);	/* LNT_IMP_CAL_CODE */
+	mtx_set(tx, MTX_TOP_CON, BIT(1), 1);		/* LNT_HS_BIAS_EN */
+
+	/* bandgap */
+	mtx_set(tx, MTX_BG_CON, GENMASK(19, 17), 4);	/* V032_SEL */
+	mtx_set(tx, MTX_BG_CON, GENMASK(16, 14), 4);	/* V04_SEL */
+	mtx_set(tx, MTX_BG_CON, GENMASK(13, 11), 4);	/* V072_SEL */
+	mtx_set(tx, MTX_BG_CON, GENMASK(10, 8), 4);	/* V10_SEL */
+	mtx_set(tx, MTX_BG_CON, GENMASK(7, 5), 4);	/* V12_SEL */
+	mtx_set(tx, MTX_BG_CON, BIT(1), 1);		/* BG_CKEN */
+	mtx_set(tx, MTX_BG_CON, BIT(0), 1);		/* BG_CORE_EN */
+	mdelay(10);
+
+	/* LDO */
+	mtx_set(tx, MTX_DSI0_CON, BIT(1), 1);		/* CKG_LDOOUT_EN */
+	mtx_set(tx, MTX_DSI0_CON, BIT(0), 1);		/* LDOCORE_EN */
+
+	/* PLL power */
+	mtx_set(tx, MTX_PLL_PWR, BIT(0), 1);		/* SDM_PWR_ON */
+	mtx_set(tx, MTX_PLL_PWR, BIT(1), 1);		/* SDM_ISO_EN */
+	mdelay(10);
+	mtx_set(tx, MTX_PLL_PWR, BIT(1), 0);
+
+	mtx_set(tx, MTX_PLL_CON0, GENMASK(2, 1), 0);	/* PREDIV */
+	mtx_set(tx, MTX_PLL_CON0, GENMASK(9, 7), 0);	/* POSDIV */
+
+	/* txdiv: same table as the vendor driver (data rate in Mbps) */
+	if (data_rate_mbps >= 500)
+		txdiv = 1;
+	else if (data_rate_mbps >= 250)
+		txdiv = 2;
+	else if (data_rate_mbps >= 125)
+		txdiv = 4;
+	else if (data_rate_mbps > 62)
+		txdiv = 8;
+	else if (data_rate_mbps >= 50)
+		txdiv = 16;
+	else
+		txdiv = 16;
+
+	switch (txdiv) {
+	case 1: mtx_set(tx, MTX_PLL_CON0, GENMASK(6, 3), 0); break;
+	case 2: mtx_set(tx, MTX_PLL_CON0, GENMASK(6, 3), 0x8); break;
+	case 4: mtx_set(tx, MTX_PLL_CON0, GENMASK(6, 3), 0x10); break;
+	case 8: mtx_set(tx, MTX_PLL_CON0, GENMASK(6, 3), 0x14); break;
+	case 16: mtx_set(tx, MTX_PLL_CON0, GENMASK(6, 3), 0x18); break;
+	}
+
+	/* PCW = data_rate * txdiv / 13 */
+	{
+		u32 prod = (u32)data_rate_mbps * txdiv;
+		pcw = prod / 13;
+		frac = prod % 13;
+		mtx_set(tx, MTX_PLL_CON2, GENMASK(30, 24), pcw & 0x7f);
+		mtx_set(tx, MTX_PLL_CON2, GENMASK(23, 16), (256 * frac / 13) & 0xff);
+		mtx_set(tx, MTX_PLL_CON2, GENMASK(15, 8),
+			(256 * ((256 * frac) % 13) / 13) & 0xff);
+		mtx_set(tx, MTX_PLL_CON2, GENMASK(7, 0),
+			(256 * ((256 * ((256 * frac) % 13)) % 13) / 13) & 0xff);
+	}
+
+	mtx_set(tx, MTX_PLL_CON1, BIT(0), 1);		/* FRA_EN */
+
+	/* clock lane + data lane 0 */
+	mtx_set(tx, MTX_CLOCK_LANE, GENMASK(11, 8), 8);	/* RT_CODE */
+	mtx_set(tx, MTX_CLOCK_LANE, BIT(5), 1);		/* PHI_SEL */
+	mtx_set(tx, MTX_CLOCK_LANE, BIT(0), 1);		/* LDOOUT_EN */
+	mtx_set(tx, MTX_DATA_LANE0, GENMASK(10, 7), 8);	/* RT_CODE */
+	mtx_set(tx, MTX_DATA_LANE0, BIT(0), 1);		/* LDOOUT_EN */
+
+	/* enable PLL */
+	mtx_set(tx, MTX_PLL_CON0, BIT(0), 1);
+	mdelay(1);
+	mtx_set(tx, MTX_PLL_CON1, BIT(2), 0);		/* SSC_EN = 0 */
+	mtx_set(tx, MTX_PLL_TOP, GENMASK(9, 8), 3);	/* PRESERVE_L */
+	mtx_set(tx, MTX_TOP_CON, BIT(11), 0);		/* PAD_TIE_LOW_EN = 0 */
+	mdelay(5);
+
+	dev_info(dsi->host.dev,
+		 "Z1DSI: MIPI TX init: rate=%llu Mbps txdiv=%u pcw=%u, "
+		 "CON0=%08x CON2=%08x PWR=%08x\n",
+		 data_rate_mbps, txdiv, pcw,
+		 readl(tx + MTX_PLL_CON0), readl(tx + MTX_PLL_CON2),
+		 readl(tx + MTX_PLL_PWR));
+
+	iounmap(tx);
 }
 
 static int mtk_dsi_poweron(struct mtk_dsi *dsi)
@@ -692,13 +885,18 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 	dsi->data_rate = DIV_ROUND_UP_ULL(dsi->vm.pixelclock * bit_per_pixel,
 					  dsi->lanes);
 
-	ret = clk_set_rate(dsi->hs_clk, dsi->data_rate);
-	if (ret < 0) {
-		dev_err(dev, "Failed to set data rate: %d\n", ret);
-		goto err_refcount;
+	if (!dsi->driver_data->mt6572_mipi_tx) {
+		ret = clk_set_rate(dsi->hs_clk, dsi->data_rate);
+		if (ret < 0) {
+			dev_err(dev, "Failed to set data rate: %d\n", ret);
+			goto err_refcount;
+		}
+		dev_info(dev, "Z1DSI: bitrate=%u set_rate_ret=%d hs_rate=%lu fmt=%d lanes=%u pixclk=%lu\n",
+			 (unsigned int)dsi->data_rate, ret,
+			 (unsigned long)clk_get_rate(dsi->hs_clk), dsi->format,
+			 dsi->lanes, (unsigned long)dsi->vm.pixelclock);
+		dev_info(dev, "Z1DSI: phy_power_on -> %d\n", phy_power_on(dsi->phy));
 	}
-
-	phy_power_on(dsi->phy);
 
 	ret = clk_prepare_enable(dsi->engine_clk);
 	if (ret < 0) {
@@ -710,6 +908,28 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 	if (ret < 0) {
 		dev_err(dev, "Failed to enable digital clock: %d\n", ret);
 		goto err_disable_engine_clk;
+	}
+
+	/*
+	 * Z1 (v55): keep whatever LK programmed into the MIPI-TX block.  LK is
+	 * demonstrably driving this panel (it is streaming video at boot), and
+	 * our DT only describes 0x90 bytes of the block while LK also writes
+	 * 0x10011848/4c/50 -- i.e. this SoC's PHY spans a page our map does not
+	 * cover.  Touching it from Linux has only ever left the PHY without a
+	 * usable clock.  Dump it instead, so the next iteration has the values.
+	 */
+	if (dsi->driver_data->mt6572_mipi_tx) {
+		void __iomem *tx = ioremap(MT6572_MIPI_TX_BASE, 0x1000);
+
+		if (tx) {
+			dev_info(dev, "Z1DSI: PHY lanes %08x %08x %08x %08x gpio_en=%08x\n",
+				 readl(tx + 0x00), readl(tx + 0x04), readl(tx + 0x08),
+				 readl(tx + 0x0c), readl(tx + 0x74));
+			dev_info(dev, "Z1DSI: PHY page800 %08x %08x %08x %08x %08x %08x\n",
+				 readl(tx + 0x840), readl(tx + 0x844), readl(tx + 0x848),
+				 readl(tx + 0x84c), readl(tx + 0x850), readl(tx + 0x854));
+			iounmap(tx);
+		}
 	}
 
 	mtk_dsi_set_cmd_mode(dsi);
@@ -726,6 +946,10 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 	mtk_dsi_set_vm_cmd(dsi);
 	mtk_dsi_config_vdo_timing(dsi);
 	mtk_dsi_set_interrupt_enable(dsi);
+
+	dev_info(dev, "Z1DSI: regs MODE_CTRL=%08x INTEN=%08x TXRX=%08x CON=%08x\n",
+		 readl(dsi->regs + DSI_MODE_CTRL), readl(dsi->regs + DSI_INTEN),
+		 readl(dsi->regs + DSI_TXRX_CTRL), readl(dsi->regs + DSI_CON_CTRL));
 
 	return 0;
 err_disable_engine_clk:
@@ -1011,7 +1235,7 @@ static int mtk_dsi_host_attach(struct mipi_dsi_host *host,
 			return ret;
 		}
 	}
-	dev_info(dev, "Z1DSI: next_bridge=%pOF ok\n", dsi->next_bridge);
+	dev_info(dev, "Z1DSI: next_bridge=%px ok\n", dsi->next_bridge);
 
 	drm_bridge_add(&dsi->bridge);
 
@@ -1039,6 +1263,17 @@ static void mtk_dsi_wait_for_idle(struct mtk_dsi *dsi)
 {
 	int ret;
 	u32 val;
+	u32 mode = readl(dsi->regs + DSI_MODE_CTRL);
+
+	/*
+	 * Z1 (v58): in video mode INTSTA.BUSY is *always* set, so polling it
+	 * here can only ever time out.  The vendor driver and this board's own
+	 * bootloader both skip the wait entirely when MODE != CMD_MODE
+	 * (dsi_drv.c:475 "if (DSI_REG->DSI_MODE_CTRL.MODE) return;";
+	 * lk.bin 0xFA0C branches straight out for video mode).
+	 */
+	if (mode & MODE)
+		return;
 
 	ret = readl_poll_timeout(dsi->regs + DSI_INTSTA, val, !(val & DSI_BUSY),
 				 4, 2000000);
@@ -1113,18 +1348,113 @@ static void mtk_dsi_cmdq(struct mtk_dsi *dsi, const struct mipi_dsi_msg *msg)
 	}
 }
 
+/*
+ * Z1: DCS command injection while the DSI is still in video mode.
+ *
+ * The engine is streaming video (INTSTA.BUSY is *permanently* set in video
+ * mode -- the vendor source says so explicitly) and switching to command mode
+ * only takes effect at a frame boundary that never comes once the bootloader's
+ * pixel feed stops.  The vendor driver therefore does not switch modes at all
+ * in this situation: it injects the DCS packet through the video-mode command
+ * channel (DSI_VM_CMD_CON 0x130 + payload at 0x134, started with START.bit16)
+ * and waits for INTSTA bit5 (VM_CMD_DONE).
+ */
+static int mtk_dsi_vm_cmd_write(struct mtk_dsi *dsi,
+				const struct mipi_dsi_msg *msg)
+{
+	u32 off = (u32)dsi->driver_data->reg_vm_cmd_off;
+	u32 con = readl(dsi->regs + off);
+	const u8 *tx = msg->tx_buf;
+	unsigned int tx_len = msg->tx_len;
+	int i;
+
+	con &= ~(VM_CMD_LONG_PKT | GENMASK(15, 8) | GENMASK(23, 16) | GENMASK(31, 24));
+	con |= VM_CMD_EN | TS_VFP_EN;
+
+	if (tx_len > 1) {
+		con |= VM_CMD_LONG_PKT;
+		con |= (MIPI_DSI_DCS_LONG_WRITE << VM_CMD_CM_DATA_ID_SHIFT);
+		con |= ((tx_len + 1) << VM_CMD_CM_DATA_0_SHIFT);
+		writel(con, dsi->regs + off);
+		/* payload: command byte then parameters, across 0x134..0x140 */
+		for (i = 0; i < tx_len; i++)
+			writeb(tx[i], dsi->regs + DSI_VM_CMD_DATA_OFF(off) + i);
+	} else {
+		u8 cmd = tx_len ? tx[0] : 0;
+		u8 par = (tx_len > 1) ? tx[1] : 0;
+
+		con |= (MIPI_DSI_DCS_SHORT_WRITE_PARAM << VM_CMD_CM_DATA_ID_SHIFT);
+		con |= (cmd << VM_CMD_CM_DATA_0_SHIFT);
+		con |= (par << VM_CMD_CM_DATA_1_SHIFT);
+		writel(con, dsi->regs + off);
+	}
+
+	writel(readl(dsi->regs + DSI_START) | DSI_START_VM_CMD_START,
+	       dsi->regs + DSI_START);
+
+	for (i = 0; i < 100; i++) {
+		u32 sta = readl(dsi->regs + DSI_INTSTA);
+
+		if (sta & VM_CMD_DONE_INT_FLAG) {
+			mtk_dsi_mask(dsi, DSI_INTSTA, VM_CMD_DONE_INT_FLAG, 0);
+			return 0;
+		}
+		usleep_range(500, 1000);
+	}
+
+	dev_info(dsi->host.dev, "Z1DSI: VM_CMD timeout INTSTA=%08x CON=%08x\n",
+		 readl(dsi->regs + DSI_INTSTA), readl(dsi->regs + off));
+	return -ETIME;
+}
+
 static ssize_t mtk_dsi_host_send_cmd(struct mtk_dsi *dsi,
 				     const struct mipi_dsi_msg *msg, u8 flag)
 {
+	int i;
+
 	mtk_dsi_wait_for_idle(dsi);
 	mtk_dsi_irq_data_clear(dsi, flag);
 	mtk_dsi_cmdq(dsi, msg);
 	mtk_dsi_start(dsi);
 
-	if (!mtk_dsi_wait_for_irq_done(dsi, flag, 2000))
-		return -ETIME;
-	else
-		return 0;
+	/*
+	 * Z1 (route A): this DSI IP is the MT6572/MT6582 generation and does
+	 * not raise CMD_DONE for us the way newer SoCs do (measured: INTSTA
+	 * stays BUSY, the IRQ never arrives).  The vendor dsi_drv.c polls
+	 * DSI_INTSTA instead of waiting for an interrupt, clears CMD_DONE by
+	 * writing the status register to 0, and resets the engine when it
+	 * stays busy.  Do the same here.
+	 */
+	/*
+	 * Z1: the vendor dsi_drv.c does not wait for CMD_DONE when it sends a
+	 * HS DCS write -- it polls DSI_INTSTA.BUSY until the engine goes idle
+	 * and then clears the whole status register:
+	 *
+	 *     OUTREG32(&DSI_CMDQ_REG->data[0], cmd);
+	 *     OUTREG32(&DSI_REG->DSI_CMDQ_SIZE, 1);
+	 *     START 0 -> 1;
+	 *     while (DSI_REG->DSI_INTSTA.BUSY) { if (>50ms) DSI_Reset(); }
+	 *     OUTREG32(&DSI_REG->DSI_INTSTA, 0x0);
+	 *
+	 * Waiting for CMD_DONE is what kept timing out on this IP.
+	 */
+	for (i = 0; i < 100; i++) {
+		if (!(readl(dsi->regs + DSI_INTSTA) & DSI_BUSY)) {
+			writel(0, dsi->regs + DSI_INTSTA);
+			return 0;
+		}
+		usleep_range(500, 1000);
+	}
+
+	dev_info(dsi->host.dev, "Z1DSI: poll busy timeout INTSTA=%08x\n",
+		 flag == CMD_DONE_INT_FLAG ? "CMD_DONE" : "IRQ", 
+		 readl(dsi->regs + DSI_INTSTA));
+	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_RESET, DSI_RESET);
+	udelay(20);
+	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_RESET, 0);
+	mtk_dsi_enable(dsi);
+
+	return -ETIME;
 }
 
 static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
@@ -1140,10 +1470,23 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 
 	dsi_mode = readl(dsi->regs + DSI_MODE_CTRL);
 	if (dsi_mode & MODE) {
-		mtk_dsi_stop(dsi);
-		ret = mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
-		if (ret)
-			goto restore_dsi_mode;
+		/*
+		 * Z1: video mode is still streaming (bootloader handover).  Do not
+		 * try to switch to command mode -- that stalls on a frame boundary
+		 * that never arrives.  Inject through the VM_CMD channel instead.
+		 */
+		ret = mtk_dsi_vm_cmd_write(dsi, msg);
+		if (!ret) {
+			/* read requests still need the command path */
+			if (!MTK_DSI_HOST_IS_READ(msg->type))
+				return 0;
+		} else {
+			dev_info(dsi->host.dev, "Z1DSI: vm_cmd failed %d, falling back\n", ret);
+			mtk_dsi_stop(dsi);
+			ret = mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
+			if (ret)
+				goto restore_dsi_mode;
+		}
 	}
 
 	if (MTK_DSI_HOST_IS_READ(msg->type))
@@ -1294,6 +1637,7 @@ static const struct mtk_dsi_driver_data mt6572_dsi_driver_data = {
 	.reg_vm_cmd_off = 0x130,
 	.has_shadow_ctl = false,
 	.has_size_ctl = false,
+	.mt6572_mipi_tx = true,
 };
 
 static const struct mtk_dsi_driver_data mt8183_dsi_driver_data = {

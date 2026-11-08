@@ -248,7 +248,17 @@ static const unsigned int mt6572_mtk_ddp_main[] = {
 static const struct mtk_mmsys_driver_data mt6572_mmsys_driver_data = {
 	.main_path = mt6572_mtk_ddp_main,
 	.main_len = ARRAY_SIZE(mt6572_mtk_ddp_main),
-	.shadow_register = false,
+	/*
+	 * Z1: must be true.  With false, mtk_crtc_ddp_irq() calls
+	 * mtk_crtc_ddp_config() from interrupt context as soon as the OVL IRQ
+	 * fires -- and the OVL is still running from what LK programmed, so the
+	 * IRQ arrives before the first atomic commit and ddp_config touches a
+	 * crtc that has no state yet:  NULL pointer in
+	 * mtk_crtc_ddp_config -> "Fatal exception in interrupt".
+	 * With shadow registers the configuration is programmed from
+	 * atomic_flush() instead, which is what MT2701 does too.
+	 */
+	.shadow_register = true,
 	.mmsys_dev_num = 1,
 };
 
