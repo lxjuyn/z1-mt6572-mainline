@@ -410,8 +410,17 @@ static const struct soc_enum mt6323_mic_mux_enum =
 static int mt6323_mic_mux_get(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
+	/*
+	 * Z1 (2026-11-08): this control is created with SOC_ENUM_EXT, i.e. it is
+	 * a PLAIN kcontrol, not a DAPM one.  snd_soc_dapm_kcontrol_to_component()
+	 * treats kcontrol->private_value as a snd_soc_dapm_widget and reads
+	 * widget->dapm at offset 4, which for a soc_enum* is NULL -> oops at
+	 * 0x00000004 the first time tinymix lists controls (the board rebooted
+	 * in a loop with PC=snd_soc_dapm_kcontrol_to_component,
+	 * LR=mt6323_mic_mux_get).  Use the plain-kcontrol accessor instead.
+	 */
 	struct mt6323_codec_priv *priv = snd_soc_component_get_drvdata(
-		snd_soc_dapm_kcontrol_to_component(kcontrol));
+		(struct snd_soc_component *)snd_kcontrol_chip(kcontrol));
 
 	ucontrol->value.enumerated.item[0] = priv->mic_mux;
 	return 0;
@@ -420,8 +429,9 @@ static int mt6323_mic_mux_get(struct snd_kcontrol *kcontrol,
 static int mt6323_mic_mux_put(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
+	/* see mt6323_mic_mux_get(): plain kcontrol, not a DAPM one */
 	struct mt6323_codec_priv *priv = snd_soc_component_get_drvdata(
-		snd_soc_dapm_kcontrol_to_component(kcontrol));
+		(struct snd_soc_component *)snd_kcontrol_chip(kcontrol));
 	unsigned int item = ucontrol->value.enumerated.item[0];
 
 	if (item > 1)

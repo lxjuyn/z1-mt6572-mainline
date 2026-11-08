@@ -995,14 +995,23 @@ static int mtk_dsi_host_attach(struct mipi_dsi_host *host,
 	dsi->next_bridge = devm_drm_of_get_bridge(dev, dev->of_node, 1, 0);
 	if (IS_ERR(dsi->next_bridge)) {
 		ret = PTR_ERR(dsi->next_bridge);
+		/* Z1 debug: which lookup failed and with what */
+		dev_info(dev, "Z1DSI: port1 lookup -> %d\n", ret);
 		if (ret == -EPROBE_DEFER)
 			return ret;
 
 		/* Old devicetree has only one endpoint */
 		dsi->next_bridge = devm_drm_of_get_bridge(dev, dev->of_node, 0, 0);
-		if (IS_ERR(dsi->next_bridge))
-			return PTR_ERR(dsi->next_bridge);
+		if (IS_ERR(dsi->next_bridge)) {
+			ret = PTR_ERR(dsi->next_bridge);
+			dev_info(dev, "Z1DSI: port0 lookup -> %d (ep=%pOF rport=%pOF)\n",
+				 ret, of_graph_get_endpoint_by_regs(dev->of_node, 0, 0),
+				 of_graph_get_remote_port_parent(
+					 of_graph_get_endpoint_by_regs(dev->of_node, 0, 0)));
+			return ret;
+		}
 	}
+	dev_info(dev, "Z1DSI: next_bridge=%pOF ok\n", dsi->next_bridge);
 
 	drm_bridge_add(&dsi->bridge);
 

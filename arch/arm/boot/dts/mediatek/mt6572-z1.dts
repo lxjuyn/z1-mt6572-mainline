@@ -874,13 +874,33 @@
  * needs a reset GPIO + AVDD rail).
  */
 &dsi {
+	/* v40 (P1): 让 KMS 接管 DSI。LK 已把面板点亮，这里沿用它的 video mode 时序；
+	 * 背光暂不动（LK 的 PWM 保持点亮），所以即使面板初始化失败也只会是"背光亮、
+	 * 画面黑"，与"背光也灭了"能区分开。回滚：刷回 out/z1_v38/boot.img。 */
+	status = "okay";
 	#address-cells = <1>;
 	#size-cells = <0>;
 
 	panel@0 {
 		compatible = "sitronix,st7785m";
 		reg = <0>;
-		status = "disabled";
+		status = "okay";
+
+		/* mtk_dsi_host_attach() 用 devm_drm_of_get_bridge() 找 panel，
+		 * 没有这条 OF graph 就会返回 -ENODEV（板上实测：
+		 * "st7785m ... error -ENODEV: Failed to attach to MIPI DSI host"）。
+		 * 写法照抄同 SoC 的 mt6572-lenovo-a369i.dts。 */
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&dsi_out>;
+			};
+		};
+	};
+
+	port {
+		dsi_out: endpoint {
+			remote-endpoint = <&panel_in>;
+		};
 	};
 };
 

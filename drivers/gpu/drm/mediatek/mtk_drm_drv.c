@@ -5,6 +5,7 @@
  */
 
 #include <linux/component.h>
+#include <linux/aperture.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
@@ -230,6 +231,27 @@ static const unsigned int mt8195_mtk_ddp_ext[] = {
 	DDP_COMPONENT_DP_INTF1,
 };
 
+/*
+ * Z1 (2026-11-08): MT6572 has no BLS (display PWM) block and this tree has no
+ * mtk_disp_pwm driver at all, so the MT2701 main path (OVL0 -> RDMA0 -> COLOR0
+ * -> BLS -> DSI0) can never be satisfied here -- the OVL/COLOR/DSI components
+ * bind, but crtc creation stops at the missing BLS and the whole display bind
+ * fails.  Use a path that matches what the MT6572 DT actually provides.
+ */
+static const unsigned int mt6572_mtk_ddp_main[] = {
+	DDP_COMPONENT_OVL0,
+	DDP_COMPONENT_RDMA0,
+	DDP_COMPONENT_COLOR0,
+	DDP_COMPONENT_DSI0,
+};
+
+static const struct mtk_mmsys_driver_data mt6572_mmsys_driver_data = {
+	.main_path = mt6572_mtk_ddp_main,
+	.main_len = ARRAY_SIZE(mt6572_mtk_ddp_main),
+	.shadow_register = false,
+	.mmsys_dev_num = 1,
+};
+
 static const struct mtk_mmsys_driver_data mt2701_mmsys_driver_data = {
 	.main_path = mt2701_mtk_ddp_main,
 	.main_len = ARRAY_SIZE(mt2701_mtk_ddp_main),
@@ -334,7 +356,7 @@ static const struct of_device_id mtk_drm_of_ids[] = {
 	{ .compatible = "mediatek,mt2701-mmsys",
 	  .data = &mt2701_mmsys_driver_data},
 	{ .compatible = "mediatek,mt6572-mmsys",
-	  .data = &mt2701_mmsys_driver_data},
+	  .data = &mt6572_mmsys_driver_data},
 	{ .compatible = "mediatek,mt7623-mmsys",
 	  .data = &mt7623_mmsys_driver_data},
 	{ .compatible = "mediatek,mt2712-mmsys",
@@ -668,9 +690,29 @@ static int mtk_drm_bind(struct device *dev)
 	for (i = 0; i < private->data->mmsys_dev_num; i++)
 		private->all_drm_private[i]->drm = drm;
 
+	/*
+	 * Z1 (2026-11-08): the bootloader leaves a simple-framebuffer scanning
+	 * out the same panel we are about to take over.  Remove any conflicting
+	 * framebuffer so simplefb and KMS cannot drive the DSI hardware at the
+	 * same time (without this the handover ends in a garbled or frozen
+	 * picture).  Safe no-op when CONFIG_APERTURE_HELPERS is off.
+	 */
 	ret = mtk_drm_kms_init(drm);
 	if (ret < 0)
 		goto err_free;
+
+	/*
+	 * Z1: only now that KMS init succeeded is it safe to take the display
+	 * over.  Doing this before kms_init (as the first version did) removes
+	 * simplefb even when the bind later fails -- and then nothing owns fb0,
+	 * so SurfaceFlinger cannot dequeue a buffer and aborts in a loop with
+	 * "eglSwapBuffers failed with 0x0000300b" (EGL_BAD_NATIVE_WINDOW).
+	 */
+	ret = aperture_remove_all_conflicting_devices("mediatek-drm");
+	if (ret) {
+		dev_err(dev, "failed to remove conflicting framebuffers: %d\n", ret);
+		goto err_deinit;
+	}
 
 	ret = drm_dev_register(drm, 0);
 	if (ret < 0)
