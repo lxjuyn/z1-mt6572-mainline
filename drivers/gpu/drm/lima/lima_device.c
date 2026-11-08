@@ -465,6 +465,49 @@ void lima_device_fini(struct lima_device *ldev)
 	lima_clk_fini(ldev);
 }
 
+/*
+ * Z1 (2026-11-08): last-resort GPU reset through the TOPRGU MFG reset line,
+ * followed by re-initialising every present IP block.
+ *
+ * Needed because a page fault can leave the PP bus un-stoppable: the per-core
+ * hard reset then fails (lima_pp.c returns -EBUSY) and nothing else in the
+ * driver ever pulses the subsystem reset -- lima_clk_disable() does, but only
+ * from runtime/system suspend, which is refused with -EBUSY while the wedged
+ * job still holds a pipe credit.  Result without this: the PP stays dead for
+ * the rest of the boot and every later job times out (measured on the board:
+ * 37 consecutive timeouts, screen frozen).
+ *
+ * dev->reset comes from devm_reset_control_array_get_optional_shared(), so
+ * reset_control_reset() would warn (deassert_count != 0); assert+deassert is
+ * the sequence that is valid here.
+ */
+int lima_device_reset(struct lima_device *ldev)
+{
+	int i, err;
+
+	dev_err(ldev->dev, "full GPU reset via TOPRGU MFG\n");
+
+	if (ldev->reset) {
+		reset_control_assert(ldev->reset);
+		udelay(10);
+		err = reset_control_deassert(ldev->reset);
+		if (err) {
+			dev_err(ldev->dev, "reset deassert failed %d\n", err);
+			return err;
+		}
+	}
+
+	for (i = 0; i < lima_ip_num; i++) {
+		err = lima_resume_ip(ldev, i);
+		if (err) {
+			dev_err(ldev->dev, "re-init ip %d failed %d\n", i, err);
+			return err;
+		}
+	}
+
+	return 0;
+}
+
 int lima_device_resume(struct device *dev)
 {
 	struct lima_device *ldev = dev_get_drvdata(dev);

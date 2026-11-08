@@ -451,14 +451,25 @@ static enum drm_gpu_sched_stat lima_sched_timedout_job(struct drm_sched_job *job
 	if (lima_max_error_tasks)
 		lima_sched_build_error_task_list(task);
 
-	pipe->task_error(pipe);
-
+	/*
+	 * Z1 (2026-11-08): reset the MMUs *before* asking the core to stop its
+	 * bus.  A page fault leaves the offending transaction stalled inside the
+	 * MMU (PAGE_FAULT_ACTIVE stays latched and this driver never issues
+	 * LIMA_MMU_COMMAND_PAGE_FAULT_DONE), and while that stall is in place the
+	 * PP can never acknowledge PP_CTRL_STOP_BUS.  With the old order
+	 * lima_pp_hard_reset() gave up after 100us -- without ever writing
+	 * PP_CTRL_FORCE_RESET -- and the PP stayed wedged for the rest of the
+	 * boot (board evidence: first fault at 190.8s, then every later job
+	 * times out after 10.24s with status=5, screen frozen forever).
+	 */
 	if (pipe->bcast_mmu)
 		lima_mmu_page_fault_resume(pipe->bcast_mmu);
 	else {
 		for (i = 0; i < pipe->num_mmu; i++)
 			lima_mmu_page_fault_resume(pipe->mmu[i]);
 	}
+
+	pipe->task_error(pipe);
 
 	lima_vm_put(pipe->current_vm);
 	pipe->current_vm = NULL;

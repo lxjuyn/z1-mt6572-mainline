@@ -182,6 +182,7 @@ static int lima_pp_hard_reset_poll(struct lima_ip *ip)
 static int lima_pp_hard_reset(struct lima_ip *ip)
 {
 	struct lima_device *dev = ip->dev;
+	bool bus_stop_failed = false;
 	int ret;
 
 	pp_write(LIMA_PP_PERF_CNT_0_LIMIT, 0xC0FFE000);
@@ -190,8 +191,16 @@ static int lima_pp_hard_reset(struct lima_ip *ip)
 	pp_write(LIMA_PP_CTRL, LIMA_PP_CTRL_STOP_BUS);
 	ret = lima_poll_timeout(ip, lima_pp_bus_stop_poll, 10, 100);
 	if (ret) {
-		dev_err(dev->dev, "%s bus stop timeout\n", lima_ip_name(ip));
-		return ret;
+		/*
+		 * Z1 (2026-11-08): do NOT bail out here.  If STOP_BUS is not
+		 * acknowledged (a page fault can hold the bus) the only way back
+		 * is PP_CTRL_FORCE_RESET, which used to be skipped because of
+		 * this early return -- leaving the PP wedged until reboot.
+		 * Log it, force the reset anyway, and let the caller escalate.
+		 */
+		dev_err(dev->dev, "%s bus stop timeout, forcing reset\n",
+			lima_ip_name(ip));
+		bus_stop_failed = true;
 	}
 
 	pp_write(LIMA_PP_CTRL, LIMA_PP_CTRL_FORCE_RESET);
@@ -211,7 +220,9 @@ static int lima_pp_hard_reset(struct lima_ip *ip)
 	 */
 	ip->data.async_reset = false;
 
-	return 0;
+	/* Z1: report the bus-stop failure even though the force reset ran, so
+	 * lima_pp_task_error() can escalate to a full subsystem reset. */
+	return bus_stop_failed ? -EBUSY : 0;
 }
 
 static void lima_pp_print_version(struct lima_ip *ip)
@@ -422,6 +433,7 @@ static void lima_pp_task_fini(struct lima_sched_pipe *pipe)
 
 static void lima_pp_task_error(struct lima_sched_pipe *pipe)
 {
+	bool failed = false;
 	int i;
 
 	for (i = 0; i < pipe->num_processor; i++) {
@@ -431,7 +443,20 @@ static void lima_pp_task_error(struct lima_sched_pipe *pipe)
 			lima_ip_name(ip), i, pp_read(LIMA_PP_INT_STATUS),
 			pp_read(LIMA_PP_STATUS));
 
-		lima_pp_hard_reset(ip);
+		if (lima_pp_hard_reset(ip)) {
+			/*
+			 * Z1: the per-core reset did not take (typically a page
+			 * fault held the bus).  Ask the whole GPU to be reset
+			 * through TOPRGU instead of leaving it wedged forever.
+			 */
+			failed = true;
+		}
+	}
+
+	if (failed) {
+		dev_err(pipe->processor[0]->dev->dev,
+			"pp hard reset incomplete, escalating to full GPU reset\n");
+		lima_device_reset(pipe->processor[0]->dev);
 	}
 
 	if (pipe->bcast_processor)
