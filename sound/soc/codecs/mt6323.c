@@ -529,7 +529,9 @@ static const struct snd_soc_dapm_route mt6323_dapm_routes[] = {
 	{ "Earpiece Driver", NULL, "Earpiece Route" },
 
 	{ "MIC Route", "Switch", "MIC Input" },
-	{ "MIC UL", NULL, "MIC Route" },
+	/* Z1: MIC UL is a SUPPLY; it may not be the sink of a switch.
+	 * Feed the switch from the supply instead (same power-up ordering). */
+	{ "MIC Route", NULL, "MIC UL" },
 	{ "AIF1 Capture", NULL, "MIC UL" },
 };
 

@@ -88,7 +88,7 @@
 		 * body = 1,981,410 B = 0x1e3be2，故 end = 0x842e3be2。
 		 * 每次换 ramdisk 都必须重算这里，否则 initrd 会被截断。
 		 */
-		linux,initrd-end = <0x842e4048>;
+		linux,initrd-end = <0x842e6000>;
 
 		/* LK leaves OVL layer 2 scanning this 240x320 RGB565 surface. */
 		framebuffer0: framebuffer@bfd00000 {
@@ -510,7 +510,7 @@
 &pmic {
 	pinctrl-0 = <&pmic_int_pins>;
 	pinctrl-names = "default";
-	interrupts-extended = <&pio 16 IRQ_TYPE_LEVEL_LOW>;
+	interrupts-extended = <&pio 16 IRQ_TYPE_LEVEL_HIGH>;
 	status = "okay";
 
 	/*
@@ -900,4 +900,20 @@
 		linux,default-trigger = "backlight";
 		default-state = "on";
 	};
+};
+
+/*
+ * CPU DVFS（2026-11-08）: mainline mediatek-cpufreq 有 mt6572 表
+ * (drivers/cpufreq/mediatek-cpufreq.c)，但它用
+ * regulator_get_optional(cpu_dev, "proc")，缺 proc-supply 就 -ENODEV 不 probe
+ * —— 这就是"没有 cpufreq"的真正原因（板上日志:
+ * KernelCpuSpeedReader: Failed to read .../cpufreq/stats/time_in_state）。
+ * OPP 表里所有频点都是 1.15 V（mt6572.dtsi 的 cpu_opp_table），所以开 DVFS 不改电压，风险低。
+ */
+&cpu0 {
+	proc-supply = <&mt6323_vproc_reg>;
+};
+
+&cpu1 {
+	proc-supply = <&mt6323_vproc_reg>;
 };

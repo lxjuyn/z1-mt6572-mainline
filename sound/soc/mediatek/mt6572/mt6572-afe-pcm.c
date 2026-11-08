@@ -752,6 +752,7 @@ static const struct snd_soc_dapm_widget mt6572_afe_widgets[] = {
 	SND_SOC_DAPM_SWITCH_E("FM Playback", SND_SOC_NOPM, 0, 0,
 			      &mt6572_afe_fm_switch, mt6572_afe_fm_event,
 			      SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_INPUT("MIC Uplink In"),
 	SND_SOC_DAPM_SUPPLY("MIC Uplink", SND_SOC_NOPM, 0, 0, mt6572_afe_ul_event,
 			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 	SND_SOC_DAPM_MUX("AWB Source", SND_SOC_NOPM, 0, 0, &mt6572_awb_src_mux),
@@ -761,10 +762,19 @@ static const struct snd_soc_dapm_route mt6572_afe_routes[] = {
 	{ "FM Playback", "Switch", "FM I2S In" },
 	{ "FM Playback", NULL, "FM I2S Rx" },
 	{ "DL1 Playback", NULL, "FM Playback" },
+	/*
+	 * Z1 (2026-11-08): a SUPPLY widget cannot sit in a route that carries a
+	 * control ("Conditional paths are not supported for supply widgets" in
+	 * soc-dapm.c), and a mux must not take a SUPPLY directly as its input.
+	 * Attach each supply to a plain INPUT pad without a control, and let the
+	 * mux select between the pads.  This is what made snd_soc_bind_card()
+	 * fail with -EINVAL, so /proc/asound/cards stayed empty.
+	 */
+	{ "FM I2S In", NULL, "FM I2S Rx" },
+	{ "MIC Uplink In", NULL, "MIC Uplink" },
 	/* the AWB memif records whichever source the mux selects */
 	{ "AWB Source", "FM I2S", "FM I2S In" },
-	{ "AWB Source", "FM I2S", "FM I2S Rx" },
-	{ "AWB Source", "MIC", "MIC Uplink" },
+	{ "AWB Source", "MIC", "MIC Uplink In" },
 	{ "AWB Capture", NULL, "AWB Source" },
 };
 
