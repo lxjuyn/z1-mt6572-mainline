@@ -30,6 +30,7 @@
 #include "mtk_ddp_comp.h"
 #include "mtk_disp_drv.h"
 #include "mtk_drm_drv.h"
+
 #include "mtk_gem.h"
 
 #define DRIVER_NAME "mediatek"
@@ -237,11 +238,17 @@ static const unsigned int mt8195_mtk_ddp_ext[] = {
  * -> BLS -> DSI0) can never be satisfied here -- the OVL/COLOR/DSI components
  * bind, but crtc creation stops at the missing BLS and the whole display bind
  * fails.  Use a path that matches what the MT6572 DT actually provides.
+ *
+ * v67: COLOR0 removed again.  mtk_crtc_ddp_hw_init() only programs the route
+ * between ADJACENT components, and mt6572-mmsys.h has no COLOR0 -> DSI0 entry
+ * at all, so with COLOR0 in the path the DSI input select (0x04c OUT_SEL,
+ * 0x050 DSI_SEL, 0x058) was never written and the DSI kept feeding off
+ * whatever LK left behind.  The table's RDMA0 -> DSI0 entries (0x050 bit0=1,
+ * 0x058 bit0=1, 0x04c=0) only fire when RDMA0's successor is DSI0.
  */
 static const unsigned int mt6572_mtk_ddp_main[] = {
 	DDP_COMPONENT_OVL0,
 	DDP_COMPONENT_RDMA0,
-	DDP_COMPONENT_COLOR0,
 	DDP_COMPONENT_DSI0,
 };
 
@@ -506,6 +513,17 @@ static int mtk_drm_kms_init(struct drm_device *drm)
 	ret = drmm_mode_config_init(drm);
 	if (ret)
 		return ret;
+
+	/*
+	 * Z1: ask the DRM fbdev client for a 16bpp (RGB565) framebuffer.
+	 * drm_fbdev_client turns mode_config.preferred_depth into the fbdev
+	 * bpp, and Android's composer HAL opens /dev/graphics/fb0 through
+	 * gralloc, whose framebuffer probe only accepts RGB565 here (the
+	 * mainline DRM default would be XRGB8888, which it rejects with
+	 * -EINVAL -- that is what kept vendor.hwcomposer-2-1 exiting with
+	 * status 1 every 5 seconds).
+	 */
+	drm->mode_config.preferred_depth = 16;
 
 	drm->mode_config.min_width = 64;
 	drm->mode_config.min_height = 64;

@@ -70,6 +70,7 @@
 #define HSTX_CKLP_EN			BIT(16)
 
 #define DSI_PSCTRL		0x1c
+#define DSI_MEM_CONTI		0x90
 #define DSI_PS_WC			GENMASK(13, 0)
 #define DSI_PS_SEL			GENMASK(17, 16)
 #define PACKED_PS_16BIT_RGB565		0
@@ -656,10 +657,24 @@ static irqreturn_t mtk_dsi_irq(int irq, void *dev_id)
 	status = readl(dsi->regs + DSI_INTSTA) & flag;
 
 	if (status) {
-		do {
+		/*
+		 * Z1: this used to be an unbounded do/while on DSI_BUSY inside a hard
+		 * IRQ.  With the engine left in the bootloader's video mode BUSY can
+		 * stay latched forever, which would hang the CPU with interrupts off.
+		 * Bound it.
+		 */
+		int i;
+
+		for (i = 0; i < 200; i++) {
 			mtk_dsi_mask(dsi, DSI_RACK, RACK, RACK);
 			tmp = readl(dsi->regs + DSI_INTSTA);
-		} while (tmp & DSI_BUSY);
+			if (!(tmp & DSI_BUSY))
+				break;
+			udelay(10);
+		}
+		if (i == 200)
+			dev_warn_ratelimited(dsi->host.dev,
+					     "Z1DSI: RACK stuck, INTSTA=%08x\n", tmp);
 
 		mtk_dsi_mask(dsi, DSI_INTSTA, status, 0);
 		mtk_dsi_irq_data_set(dsi, status);
@@ -711,16 +726,6 @@ static s32 mtk_dsi_switch_to_cmd_mode(struct mtk_dsi *dsi, u8 irq_flag, u32 t)
 	/* Z1: if the write to MODE_CTRL does not stick, this DSI IP does not
 	 * use the MT2701 register map and nothing we program will ever reach
 	 * the hardware. */
-	dev_info(dev, "Z1DSI: cmd_mode before=%08x after=%08x START=%08x CON=%08x TXRX=%08x INTSTA=%08x\n",
-		 before, after, readl(dsi->regs + DSI_START),
-		 readl(dsi->regs + DSI_CON_CTRL), readl(dsi->regs + DSI_TXRX_CTRL),
-		 readl(dsi->regs + DSI_INTSTA));
-	dev_info(dev, "Z1DSI: after reset INTSTA=%08x CON=%08x\n",
-		 readl(dsi->regs + DSI_INTSTA), readl(dsi->regs + DSI_CON_CTRL));
-	dev_info(dev, "Z1DSI: clk engine=%lu digital=%lu hs=%lu\n",
-		 (unsigned long)clk_get_rate(dsi->engine_clk),
-		 (unsigned long)clk_get_rate(dsi->digital_clk),
-		 (unsigned long)clk_get_rate(dsi->hs_clk));
 
 	if (!mtk_dsi_wait_for_irq_done(dsi, irq_flag, t)) {
 		DRM_ERROR("failed to switch cmd mode\n");
@@ -856,15 +861,25 @@ static void mtk_dsi_mt6572_mipi_tx_init(struct mtk_dsi *dsi)
 	mtx_set(tx, MTX_TOP_CON, BIT(11), 0);		/* PAD_TIE_LOW_EN = 0 */
 	mdelay(5);
 
-	dev_info(dsi->host.dev,
-		 "Z1DSI: MIPI TX init: rate=%llu Mbps txdiv=%u pcw=%u, "
-		 "CON0=%08x CON2=%08x PWR=%08x\n",
-		 data_rate_mbps, txdiv, pcw,
-		 readl(tx + MTX_PLL_CON0), readl(tx + MTX_PLL_CON2),
-		 readl(tx + MTX_PLL_PWR));
 
 	iounmap(tx);
 }
+
+/*
+ * Z1 (v65) "route B": the command-queue engine on this MT6572 never retires a
+ * DCS packet.  The v64 probe measured it directly -- LP and HS both time out
+ * after 20 ms with DBG6 = 0x0001, which the vendor decoder table calls
+ * "Idle (wait for command)": the engine accepts START (INTSTA.BUSY latches)
+ * but never picks the command up.  LK has already initialised the panel and
+ * is streaming video when we take over, so the only thing Linux has to do is
+ * feed pixels.  With this enabled the whole DSI block -- MODE, START, PHY,
+ * timing -- is left exactly as handed over, and all panel DCS traffic is
+ * skipped (see panel-sitronix-st7785m.c:keep_lk_panel).
+ */
+static bool z1_keep_lk_dsi = true;
+module_param_named(keep_lk_dsi, z1_keep_lk_dsi, bool, 0644);
+
+static void mtk_dsi_lane_ready(struct mtk_dsi *dsi);
 
 static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 {
@@ -891,11 +906,6 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 			dev_err(dev, "Failed to set data rate: %d\n", ret);
 			goto err_refcount;
 		}
-		dev_info(dev, "Z1DSI: bitrate=%u set_rate_ret=%d hs_rate=%lu fmt=%d lanes=%u pixclk=%lu\n",
-			 (unsigned int)dsi->data_rate, ret,
-			 (unsigned long)clk_get_rate(dsi->hs_clk), dsi->format,
-			 dsi->lanes, (unsigned long)dsi->vm.pixelclock);
-		dev_info(dev, "Z1DSI: phy_power_on -> %d\n", phy_power_on(dsi->phy));
 	}
 
 	ret = clk_prepare_enable(dsi->engine_clk);
@@ -922,16 +932,39 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 		void __iomem *tx = ioremap(MT6572_MIPI_TX_BASE, 0x1000);
 
 		if (tx) {
-			dev_info(dev, "Z1DSI: PHY lanes %08x %08x %08x %08x gpio_en=%08x\n",
-				 readl(tx + 0x00), readl(tx + 0x04), readl(tx + 0x08),
-				 readl(tx + 0x0c), readl(tx + 0x74));
-			dev_info(dev, "Z1DSI: PHY page800 %08x %08x %08x %08x %08x %08x\n",
-				 readl(tx + 0x840), readl(tx + 0x844), readl(tx + 0x848),
-				 readl(tx + 0x84c), readl(tx + 0x850), readl(tx + 0x854));
 			iounmap(tx);
 		}
 	}
 
+	/*
+	 * Z1 (v62): the bootloader hands us a DSI that is *already scanning
+	 * video* with DSI_START bit0 = 1 and MODE_CTRL = BURST (3).  The vendor
+	 * boot flow is the opposite: DSI_Init() leaves the engine in command
+	 * mode (the IP resets MODE_CTRL to 0), the LCM init sequence goes out
+	 * through the command queue, and only afterwards does the LCM layer call
+	 * DSI_SetMode(video) + DSI_Start().  Vendor DSI_SetMode() is a bare
+	 * read-modify-write of the MODE field -- it does not stop a running scan
+	 * -- so simply writing CMD_MODE over LK's video stream leaves the engine
+	 * walking frames, INTSTA.BUSY (bit31) latched, and every command-queue
+	 * transaction times out.  Stop the engine first, then switch, then
+	 * re-enable -- the same order vendor DSI_handle_int_TE() uses for
+	 * VDO -> CMD (clk_hs_mode(0), COM_CTRL.RESET, DPI_DisableClk, SetMode).
+	 */
+
+	/*
+	 * Z1 (v63): vendor VDO -> CMD sequence (dsi_drv.c:2410-2432) starts
+	 * with DSI_clk_HS_mode(0) -- the clock lane must leave continuous HS
+	 * before the engine can emit an HS command burst.  LK left us with
+	 * LC_HS_TX_EN = 1 because it was streaming video, which is why the
+	 * first DCS write latched INTSTA.BUSY forever instead of completing.
+	 */
+	if (z1_keep_lk_dsi) {
+		dev_info(dev, "Z1DSI: route B -- keeping LK video stream; no DSI reconfiguration from Linux\n");
+		return 0;
+	}
+
+	mtk_dsi_clk_hs_mode(dsi, 0);
+	mtk_dsi_stop(dsi);
 	mtk_dsi_set_cmd_mode(dsi);
 	mtk_dsi_enable(dsi);
 
@@ -940,6 +973,15 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 		       dsi->regs + dsi->driver_data->reg_shadow_dbg_off);
 
 	mtk_dsi_reset_engine(dsi);
+	/* vendor DSI_Init(): DSI_MEM_CONTI = 0x3C (write continuous) */
+	writel(0x3C, dsi->regs + DSI_MEM_CONTI);
+
+	/* Z1 (v63): clear any latched status (incl. BUSY bit31) left by LK's
+	 * video stream, then drive the D-PHY lanes to LP-11 so the command
+	 * queue can emit an HS/LP burst at all.
+	 */
+	writel(0, dsi->regs + DSI_INTSTA);
+	mtk_dsi_lane_ready(dsi);
 	mtk_dsi_phy_timconfig(dsi);
 
 	mtk_dsi_ps_control(dsi, true);
@@ -947,9 +989,6 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 	mtk_dsi_config_vdo_timing(dsi);
 	mtk_dsi_set_interrupt_enable(dsi);
 
-	dev_info(dev, "Z1DSI: regs MODE_CTRL=%08x INTEN=%08x TXRX=%08x CON=%08x\n",
-		 readl(dsi->regs + DSI_MODE_CTRL), readl(dsi->regs + DSI_INTEN),
-		 readl(dsi->regs + DSI_TXRX_CTRL), readl(dsi->regs + DSI_CON_CTRL));
 
 	return 0;
 err_disable_engine_clk:
@@ -967,6 +1006,9 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
 		return;
 
 	if (--dsi->refcount != 0)
+		return;
+
+	if (z1_keep_lk_dsi)
 		return;
 
 	/*
@@ -1015,6 +1057,14 @@ static void mtk_output_dsi_enable(struct mtk_dsi *dsi)
 	if (dsi->enabled)
 		return;
 
+	if (z1_keep_lk_dsi) {
+		dev_info(dsi->host.dev,
+			 "Z1DSI: route B -- DSI/PHY/timing left as LK configured them (MODE=%08x START=%08x)\n",
+			 readl(dsi->regs + DSI_MODE_CTRL), readl(dsi->regs + DSI_START));
+		dsi->enabled = true;
+		return;
+	}
+
 	mtk_dsi_lane_ready(dsi);
 	mtk_dsi_set_mode(dsi);
 	mtk_dsi_clk_hs_mode(dsi, 1);
@@ -1028,6 +1078,11 @@ static void mtk_output_dsi_disable(struct mtk_dsi *dsi)
 {
 	if (!dsi->enabled)
 		return;
+
+	if (z1_keep_lk_dsi) {
+		dsi->enabled = false;
+		return;
+	}
 
 	dsi->enabled = false;
 }
@@ -1220,7 +1275,6 @@ static int mtk_dsi_host_attach(struct mipi_dsi_host *host,
 	if (IS_ERR(dsi->next_bridge)) {
 		ret = PTR_ERR(dsi->next_bridge);
 		/* Z1 debug: which lookup failed and with what */
-		dev_info(dev, "Z1DSI: port1 lookup -> %d\n", ret);
 		if (ret == -EPROBE_DEFER)
 			return ret;
 
@@ -1228,14 +1282,9 @@ static int mtk_dsi_host_attach(struct mipi_dsi_host *host,
 		dsi->next_bridge = devm_drm_of_get_bridge(dev, dev->of_node, 0, 0);
 		if (IS_ERR(dsi->next_bridge)) {
 			ret = PTR_ERR(dsi->next_bridge);
-			dev_info(dev, "Z1DSI: port0 lookup -> %d (ep=%pOF rport=%pOF)\n",
-				 ret, of_graph_get_endpoint_by_regs(dev->of_node, 0, 0),
-				 of_graph_get_remote_port_parent(
-					 of_graph_get_endpoint_by_regs(dev->of_node, 0, 0)));
 			return ret;
 		}
 	}
-	dev_info(dev, "Z1DSI: next_bridge=%px ok\n", dsi->next_bridge);
 
 	drm_bridge_add(&dsi->bridge);
 
@@ -1366,45 +1415,43 @@ static int mtk_dsi_vm_cmd_write(struct mtk_dsi *dsi,
 	u32 con = readl(dsi->regs + off);
 	const u8 *tx = msg->tx_buf;
 	unsigned int tx_len = msg->tx_len;
-	int i;
+	unsigned int i;
+
+	/* payload window is 16 bytes (0x134..0x143) */
+	if (!tx || tx_len < 1 || tx_len > 16)
+		return -EINVAL;
 
 	con &= ~(VM_CMD_LONG_PKT | GENMASK(15, 8) | GENMASK(23, 16) | GENMASK(31, 24));
 	con |= VM_CMD_EN | TS_VFP_EN;
 
-	if (tx_len > 1) {
+	if (tx_len > 2) {
+		/* long write: WC counts the command byte itself */
 		con |= VM_CMD_LONG_PKT;
 		con |= (MIPI_DSI_DCS_LONG_WRITE << VM_CMD_CM_DATA_ID_SHIFT);
-		con |= ((tx_len + 1) << VM_CMD_CM_DATA_0_SHIFT);
+		con |= (tx_len << VM_CMD_CM_DATA_0_SHIFT);
 		writel(con, dsi->regs + off);
-		/* payload: command byte then parameters, across 0x134..0x140 */
 		for (i = 0; i < tx_len; i++)
 			writeb(tx[i], dsi->regs + DSI_VM_CMD_DATA_OFF(off) + i);
-	} else {
-		u8 cmd = tx_len ? tx[0] : 0;
-		u8 par = (tx_len > 1) ? tx[1] : 0;
-
+	} else if (tx_len == 2) {
 		con |= (MIPI_DSI_DCS_SHORT_WRITE_PARAM << VM_CMD_CM_DATA_ID_SHIFT);
-		con |= (cmd << VM_CMD_CM_DATA_0_SHIFT);
-		con |= (par << VM_CMD_CM_DATA_1_SHIFT);
+		con |= (tx[0] << VM_CMD_CM_DATA_0_SHIFT);
+		con |= (tx[1] << VM_CMD_CM_DATA_1_SHIFT);
+		writel(con, dsi->regs + off);
+	} else {
+		con |= (MIPI_DSI_DCS_SHORT_WRITE << VM_CMD_CM_DATA_ID_SHIFT);
+		con |= (tx[0] << VM_CMD_CM_DATA_0_SHIFT);
 		writel(con, dsi->regs + off);
 	}
 
-	writel(readl(dsi->regs + DSI_START) | DSI_START_VM_CMD_START,
-	       dsi->regs + DSI_START);
+	/* vendor LK: clear VM_CMD_START then set it, so the hardware sees 0->1 */
+	mtk_dsi_mask(dsi, DSI_START, DSI_START_VM_CMD_START, 0);
+	mtk_dsi_mask(dsi, DSI_START, DSI_START_VM_CMD_START,
+		     DSI_START_VM_CMD_START);
 
-	for (i = 0; i < 100; i++) {
-		u32 sta = readl(dsi->regs + DSI_INTSTA);
+	/* neither the vendor driver nor this board's LK waits for completion */
+	usleep_range(1000, 2000);
 
-		if (sta & VM_CMD_DONE_INT_FLAG) {
-			mtk_dsi_mask(dsi, DSI_INTSTA, VM_CMD_DONE_INT_FLAG, 0);
-			return 0;
-		}
-		usleep_range(500, 1000);
-	}
-
-	dev_info(dsi->host.dev, "Z1DSI: VM_CMD timeout INTSTA=%08x CON=%08x\n",
-		 readl(dsi->regs + DSI_INTSTA), readl(dsi->regs + off));
-	return -ETIME;
+	return 0;
 }
 
 static ssize_t mtk_dsi_host_send_cmd(struct mtk_dsi *dsi,
@@ -1446,9 +1493,6 @@ static ssize_t mtk_dsi_host_send_cmd(struct mtk_dsi *dsi,
 		usleep_range(500, 1000);
 	}
 
-	dev_info(dsi->host.dev, "Z1DSI: poll busy timeout INTSTA=%08x\n",
-		 flag == CMD_DONE_INT_FLAG ? "CMD_DONE" : "IRQ", 
-		 readl(dsi->regs + DSI_INTSTA));
 	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_RESET, DSI_RESET);
 	udelay(20);
 	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_RESET, 0);
@@ -1481,7 +1525,6 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 			if (!MTK_DSI_HOST_IS_READ(msg->type))
 				return 0;
 		} else {
-			dev_info(dsi->host.dev, "Z1DSI: vm_cmd failed %d, falling back\n", ret);
 			mtk_dsi_stop(dsi);
 			ret = mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
 			if (ret)

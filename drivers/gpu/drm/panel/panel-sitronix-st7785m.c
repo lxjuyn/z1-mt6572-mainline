@@ -35,6 +35,17 @@
 #include <drm/drm_modes.h>
 #include <drm/drm_panel.h>
 
+/*
+ * Z1 (v65) "route B": LK already ran this panel's power-on sequence and is
+ * streaming video at handover, but the MT6572 DSI command queue in this tree
+ * never retires a DCS packet (see mtk_dsi.c:z1_keep_lk_dsi).  Re-initialising
+ * the panel from Linux therefore cannot work -- and touching the reset line
+ * would only destroy the state LK left behind.  With this enabled every
+ * panel call becomes a no-op and the DSI stream is left untouched.
+ */
+static bool z1_keep_lk_panel = true;
+module_param_named(keep_lk_panel, z1_keep_lk_panel, bool, 0644);
+
 /* ST7789V/ST7785M family extended commands (same command set). */
 #define ST7789V_PORCTRL_CMD	0xb2	/* Porch control */
 #define ST7789V_GCTRL_CMD	0xb7	/* Gate control */
@@ -211,6 +222,12 @@ static int st7785m_prepare(struct drm_panel *panel)
 			return ret;
 	}
 
+	if (z1_keep_lk_panel) {
+		dev_info(&ctx->dsi->dev,
+			 "Z1DSI: route B -- panel already initialised by LK, skipping reset + DCS init\n");
+		return 0;
+	}
+
 	if (ctx->reset) {
 		/* Reset pulse (active low). */
 		gpiod_set_value(ctx->reset, 0);	/* assert reset */
@@ -226,12 +243,18 @@ static int st7785m_enable(struct drm_panel *panel)
 {
 	struct st7785m *ctx = panel_to_st7785m(panel);
 
+	if (z1_keep_lk_panel)
+		return 0;
+
 	return mipi_dsi_dcs_set_display_on(ctx->dsi);
 }
 
 static int st7785m_disable(struct drm_panel *panel)
 {
 	struct st7785m *ctx = panel_to_st7785m(panel);
+
+	if (z1_keep_lk_panel)
+		return 0;
 
 	return mipi_dsi_dcs_set_display_off(ctx->dsi);
 }
@@ -240,6 +263,9 @@ static int st7785m_unprepare(struct drm_panel *panel)
 {
 	struct st7785m *ctx = panel_to_st7785m(panel);
 	int ret;
+
+	if (z1_keep_lk_panel)
+		return 0;
 
 	/* LK suspend table: Display Off, delay 120ms, Sleep In, delay 120ms. */
 	ret = mipi_dsi_dcs_set_display_off(ctx->dsi);

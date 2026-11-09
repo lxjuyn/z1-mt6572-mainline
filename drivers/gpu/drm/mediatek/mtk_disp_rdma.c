@@ -431,8 +431,15 @@ static const struct mtk_disp_rdma_data mt6572_rdma_driver_data = {
 	.fifo_size = 3840,
 	.formats = mt8173_formats,
 	.num_formats = ARRAY_SIZE(mt8173_formats),
-	.size_con0 = 0,
-	.size_con1 = 0,
+	/*
+	 * Z1 (v67): the vendor RDMA driver always programs the frame geometry:
+	 * SIZE_CON_0[11:0] = width, SIZE_CON_1[19:0] = height
+	 * (ddp_rdma.c:371-388, ddp_rdma.h:63-99).  With both masks 0 these
+	 * registers were never written, so RDMA kept whatever LK left there
+	 * even after the CRTC resolution changed.
+	 */
+	.size_con0 = 0xfff,
+	.size_con1 = 0xfffff,
 	.fmt_convert = rdma_fmt_convert_mt65xx,
 };
 
