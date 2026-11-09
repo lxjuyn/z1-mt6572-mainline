@@ -1088,8 +1088,6 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 				has_ctm = true;
 		}
 
-		mtk_ddp_comp_register_vblank_cb(comp, mtk_crtc_ddp_irq,
-						&mtk_crtc->base);
 	}
 
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
@@ -1122,6 +1120,20 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 	drm_crtc_enable_color_mgmt(&mtk_crtc->base, 0, has_ctm, gamma_lut_size);
 	mutex_init(&mtk_crtc->hw_lock);
 	spin_lock_init(&mtk_crtc->config_lock);
+
+	/*
+	 * Register the vblank handlers only now.  mtk_crtc_ddp_irq() dereferences
+	 * crtc->dev->dev_private and takes mtk_crtc->hw_lock, neither of which
+	 * exists before mtk_crtc_init()/mutex_init() above.  The OVL and RDMA
+	 * interrupts are already live here (the bootloader configured the
+	 * pipeline and we keep its video stream), so registering earlier leaves
+	 * a window where a vblank panics the kernel: observed once in 11 boots
+	 * as a NULL dereference in mtk_crtc_ddp_irq() with r0 = NULL.
+	 */
+	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++)
+		mtk_ddp_comp_register_vblank_cb(mtk_crtc->ddp_comp[i],
+						mtk_crtc_ddp_irq,
+						&mtk_crtc->base);
 
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	i = priv->mbox_index++;
