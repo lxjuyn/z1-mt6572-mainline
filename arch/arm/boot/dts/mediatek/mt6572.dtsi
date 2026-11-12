@@ -27,65 +27,74 @@
 		compatible = "operating-points-v2";
 		opp-shared;
 
-		nvmem-cells = <&cpu_speedbin>;
-		nvmem-cell-names = "speedbin";
+		/*
+		 * Z1 (2026-11-12): the speedbin restriction (nvmem-cells = <&cpu_speedbin>
+		 * + opp-supported-hw) is deliberately dropped.  On this board the
+		 * socinfo/efuse cell does not resolve, and the OPP core then discards
+		 * *every* entry -- the kernel logged
+		 *     cpu cpu0: _of_add_opp_table_v2: no supported OPPs
+		 *     cpu cpu0: OPP table can't be empty
+		 * and cpufreq-dt never registered, so /sys/.../cpufreq stayed absent and
+		 * the CPU was stuck at whatever armpll the bootloader left (1001 MHz).
+		 * The retained table contains 598/806/1001/1209/1300 MHz.  The boot
+		 * policy selects 806--1300 MHz; no 1508 MHz point is present.  These
+		 * validated settings do not establish a physical silicon limit.
+		 */
+
 
 		/* MT6572M, MT6572A, MT6572W */
 		opp-598000000 {
 			opp-hz = /bits/ 64 <598000000>;
 			opp-microvolt = <1150000>;
-			opp-supported-hw = <0xf>;
 		};
 
 		opp-806000000 {
 			opp-hz = /bits/ 64 <806000000>;
 			opp-microvolt = <1150000>;
-			opp-supported-hw = <0xf>;
 		};
 
 		opp-1001000000 {
 			opp-hz = /bits/ 64 <1001000000>;
 			opp-microvolt = <1150000>;
-			opp-supported-hw = <0xf>;
 		};
 
 		/* MT6572A, MT6572W */
 		opp-1209000000 {
 			opp-hz = /bits/ 64 <1209000000>;
 			opp-microvolt = <1150000>;
-			opp-supported-hw = <0x7>;
 		};
 
 		/* MT6572W */
 		opp-1300000000 {
 			opp-hz = /bits/ 64 <1300000000>;
 			opp-microvolt = <1150000>;
-			opp-supported-hw = <0x3>;
 		};
 
-		opp-1404000000 {
-			opp-hz = /bits/ 64 <1404000000>;
-			opp-microvolt = <1150000>;
-			opp-supported-hw = <0x3>;
-		};
+
+		/* Higher CPU operating points remain disabled pending validation. */
 	};
 
 	gpu_opp_table: gpu-opp-table {
 		compatible = "operating-points-v2";
 
-		opp-400000000 {
-			opp-hz = /bits/ 64 <400000000>;
-			opp-supported-hw = <0x1>;
+		/*
+		 * Z1 (2026-11-12): the previous table (400/600/800 MHz,
+		 * opp-supported-hw copied from another Mali-400 SoC) was never
+		 * referenced by the GPU node and does not describe this clock
+		 * tree at all.  MT6572 feeds mfg_bg3d from mfg_sel, a 1-bit mux
+		 * that can only select:
+		 *   0 = upll_d3    = 416 MHz (UNIVPLL/3, the rated maximum)
+		 *   1 = mfg_mux_sel (which can reach clk26m = 26 MHz)
+		 * so those are the only two rates the hardware can actually be
+		 * asked for without overclocking.  devfreq (simple_ondemand)
+		 * then idles the GPU at 26 MHz and lifts it to 416 MHz on load.
+		 */
+		opp-26000000 {
+			opp-hz = /bits/ 64 <26000000>;
 		};
 
-		opp-600000000 {
-			opp-hz = /bits/ 64 <600000000>;
-			opp-supported-hw = <0x3>;
-		};
-
-		opp-800000000 {
-			opp-hz = /bits/ 64 <800000000>;
-			opp-supported-hw = <0x1>;
+		opp-416000000 {
+			opp-hz = /bits/ 64 <416000000>;
 		};
 	};
 
@@ -569,6 +578,7 @@
 					  "ppmmu0";
 			clocks = <&mfgcfg CLK_MFG_BG3D>, <&mfgcfg CLK_MFG_BG3D>;
 			clock-names = "bus", "core";
+			operating-points-v2 = <&gpu_opp_table>;
 
 			power-domains = <&spm MT6572_POWER_DOMAIN_MFG>;
 			resets = <&watchdog MT6572_TOPRGU_MFG_SW_RST>;
