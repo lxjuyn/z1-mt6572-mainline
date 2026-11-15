@@ -56,9 +56,15 @@ static irqreturn_t mt6779_keypad_irq_handler(int irq, void *dev_id)
 	unsigned int scancode;
 	unsigned int row_shift = get_count_order(keypad->n_cols);
 	bool pressed;
+	int error;
 
-	regmap_bulk_read(keypad->regmap, MTK_KPD_MEM,
-			 new_state, MTK_KPD_NUM_MEMS);
+	error = regmap_bulk_read(keypad->regmap, MTK_KPD_MEM,
+				 new_state, MTK_KPD_NUM_MEMS);
+	if (error) {
+		dev_err_ratelimited(&keypad->input_dev->dev,
+				    "Failed to read key state: %d\n", error);
+		return IRQ_HANDLED;
+	}
 
 	bitmap_xor(change, new_state, keypad->keymap_state, MTK_KPD_NUM_BITS);
 
