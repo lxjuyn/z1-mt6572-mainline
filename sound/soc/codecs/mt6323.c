@@ -504,7 +504,7 @@ static const struct snd_soc_dapm_widget mt6323_dapm_widgets[] = {
 	SND_SOC_DAPM_SWITCH("Earpiece Route", SND_SOC_NOPM, 0, 0, &earpiece_route_switch),
 	SND_SOC_DAPM_INPUT("MIC Input"),
 	SND_SOC_DAPM_SWITCH("MIC Route", SND_SOC_NOPM, 0, 0, &mic_route_switch),
-	SND_SOC_DAPM_SUPPLY("MIC UL", SND_SOC_NOPM, 0, 0, mt6323_mic_event,
+	SND_SOC_DAPM_SUPPLY_S("MIC UL", 1, SND_SOC_NOPM, 0, 0, mt6323_mic_event,
 			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 
 	SND_SOC_DAPM_SUPPLY("AUDCLK", SND_SOC_NOPM, 0, 0, mt6323_clk_event,
@@ -546,6 +546,12 @@ static const struct snd_soc_dapm_route mt6323_dapm_routes[] = {
 	 * MIC Input signal path disconnected from the DAI.
 	 */
 	{ "MIC Route", NULL, "MIC UL" },
+	/* Keep the shared clock on for capture-only and duplex streams.  MIC UL
+	 * uses a later supply subsequence so clocks precede its register sequence
+	 * on power-up, and remain on until that sequence finishes on power-down.
+	 * NEWIF is downlink-only and must not be pulled in by the capture path.
+	 */
+	{ "MIC UL", NULL, "AUDCLK" },
 	{ "AIF1 Capture", NULL, "MIC Route" },
 };
 
