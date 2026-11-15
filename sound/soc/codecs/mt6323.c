@@ -12,6 +12,7 @@
 #include <linux/delay.h>
 #include <linux/mfd/mt6397/core.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 
@@ -99,11 +100,14 @@
 struct mt6323_codec_priv {
 	struct device *dev;
 	struct regmap *regmap;		/* borrowed from the parent MT6323 MFD */
+	struct mutex newif_lock;		/* shared DL/UL configuration trigger */
 	unsigned int mic_mux;		/* "MIC Input Mux": 0 = MIC1, 1 = MIC2 */
 	unsigned int mic_rate;		/* capture sample rate, from .hw_params */
 	bool mic_pwr;			/* MIC UL analog currently powered */
 	bool dl_pwr;			/* downlink DAC currently powered */
 };
+
+static int mt6323_top_trigger(struct mt6323_codec_priv *priv);
 
 /*
  * Analog idle baseline from the stock power-on; the MT6323 audio fields are
@@ -167,15 +171,21 @@ static int mt6323_newif_event(struct snd_soc_dapm_widget *w,
 {
 	struct mt6323_codec_priv *priv =
 		snd_soc_component_get_drvdata(snd_soc_dapm_to_component(w->dapm));
+	int ret;
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
-		/* enable the ABB AFE bridge (CON0) and its clock/format config (CON11) */
-		regmap_update_bits(priv->regmap, ABB_AFE_CON(0),  0x0001, 0x0001);
-		regmap_update_bits(priv->regmap, ABB_AFE_CON(11), 0x0303, 0x0303);
-		break;
+		/* CON11 is a request/ack handshake, not an enable register. */
+		mutex_lock(&priv->newif_lock);
+		ret = mt6323_top_trigger(priv);
+		if (ret) {
+			mutex_unlock(&priv->newif_lock);
+			return ret;
+		}
+		ret = regmap_update_bits(priv->regmap, ABB_AFE_CON(0), 0x0001, 0x0001);
+		mutex_unlock(&priv->newif_lock);
+		return ret;
 	case SND_SOC_DAPM_POST_PMD:
-		regmap_update_bits(priv->regmap, ABB_AFE_CON(11), 0x0303, 0x0000);
 		regmap_update_bits(priv->regmap, ABB_AFE_CON(0),  0x0001, 0x0000);
 		break;
 	}
@@ -191,13 +201,17 @@ static int mt6323_dac_event(struct snd_soc_dapm_widget *w,
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
+		mutex_lock(&priv->newif_lock);
 		priv->dl_pwr = true;
+		mutex_unlock(&priv->newif_lock);
 		regmap_write(priv->regmap, AUDTOP_CON(5), 0x0014);	/* DAC output level: stock plays here; old 0x7714 over-drove the speaker */
 		/* scoped to the DAC's own bits: the UL mic path shares CON0 */
 		regmap_update_bits(priv->regmap, AUDTOP_CON(0), 0x7010, 0x7010);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
+		mutex_lock(&priv->newif_lock);
 		priv->dl_pwr = false;
+		mutex_unlock(&priv->newif_lock);
 		regmap_update_bits(priv->regmap, AUDTOP_CON(0), 0x7010, 0x6010);
 		regmap_write(priv->regmap, AUDTOP_CON(5), 0x0014);	/* baseline */
 		break;
@@ -306,13 +320,17 @@ static int mt6323_speaker_event(struct snd_soc_dapm_widget *w,
 #define AUDTOP_CON7_TEARDOWN_MASK	GENMASK(7, 4)
 
 /* Toggle the ABB top-control apply trigger (stock TopCtlChangeTrigger). */
-static void mt6323_top_trigger(struct mt6323_codec_priv *priv)
+static int mt6323_top_trigger(struct mt6323_codec_priv *priv)
 {
 	unsigned int con11;
+	int ret;
 
-	regmap_read(priv->regmap, ABB_AFE_CON(11), &con11);
-	regmap_update_bits(priv->regmap, ABB_AFE_CON(11), ABB_AFE_CON11_TOP_TRIG,
-			   (con11 & BIT(0)) ? 0 : ABB_AFE_CON11_TOP_TRIG);
+	ret = regmap_read(priv->regmap, ABB_AFE_CON(11), &con11);
+	if (ret)
+		return ret;
+	return regmap_update_bits(priv->regmap, ABB_AFE_CON(11),
+				  ABB_AFE_CON11_TOP_TRIG,
+				  (con11 & BIT(0)) ? 0 : ABB_AFE_CON11_TOP_TRIG);
 }
 
 /* Apply the mic input mux: L in AUDTOP_CON0[3:0], R follows via the swap bit */
@@ -350,11 +368,13 @@ static int mt6323_mic_event(struct snd_soc_dapm_widget *w,
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
 		/* PMIC UL digital interface (stock AnalogOpen DEVICE_IN_ADC) */
+		mutex_lock(&priv->newif_lock);
 		regmap_write(priv->regmap, ABB_AFE_PMIC_NEWIF_CFG2,
 			     NEWIF_CFG2_UL_BASE | (ul_newif << 10));
 		regmap_update_bits(priv->regmap, ABB_AFE_CON(1), ABB_AFE_CON1_UL_RATE,
 				   (priv->mic_rate == 48000) ? ABB_AFE_CON1_UL_RATE : 0);
 		mt6323_top_trigger(priv);
+		mutex_unlock(&priv->newif_lock);
 		regmap_update_bits(priv->regmap, ABB_AFE_CON(0), ABB_AFE_CON0_UL_ON,
 				   ABB_AFE_CON0_UL_ON);
 
@@ -382,9 +402,11 @@ static int mt6323_mic_event(struct snd_soc_dapm_widget *w,
 		regmap_update_bits(priv->regmap, AUDTOP_CON(2),
 				   AUDTOP_CON2_R_ADC_MASK, 0);
 		/* LCH VCM: drop 2.4V; keep the 1.4V rail while the DAC is on */
+		mutex_lock(&priv->newif_lock);
 		regmap_update_bits(priv->regmap, AUDTOP_CON(0),
 				   AUDTOP_CON0_L_VCM_MASK,
 				   priv->dl_pwr ? 0x7000 : AUDTOP_CON0_L_VCM_OFF);
+		mutex_unlock(&priv->newif_lock);
 		regmap_update_bits(priv->regmap, AUDTOP_CON(2),
 				   AUDTOP_CON2_R_VCM_MASK, AUDTOP_CON2_R_VCM_OFF);
 		/* back to the vendor's open-mux idle state */
@@ -509,7 +531,7 @@ static const struct snd_soc_dapm_widget mt6323_dapm_widgets[] = {
 
 	SND_SOC_DAPM_SUPPLY("AUDCLK", SND_SOC_NOPM, 0, 0, mt6323_clk_event,
 			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
-	SND_SOC_DAPM_SUPPLY("NEWIF", SND_SOC_NOPM, 0, 0, mt6323_newif_event,
+	SND_SOC_DAPM_SUPPLY_S("NEWIF", 1, SND_SOC_NOPM, 0, 0, mt6323_newif_event,
 			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 	SND_SOC_DAPM_DAC_E("DAC", NULL, SND_SOC_NOPM, 0, 0, mt6323_dac_event,
 			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
@@ -529,6 +551,7 @@ static const struct snd_soc_dapm_route mt6323_dapm_routes[] = {
 	{ "DAC", NULL, "AIF1 Playback" },
 	{ "DAC", NULL, "AUDCLK" },
 	{ "DAC", NULL, "NEWIF" },
+	{ "NEWIF", NULL, "AUDCLK" },
 	{ "HP Driver", NULL, "DAC" },
 	{ "Headphone", NULL, "HP Driver" },
 
@@ -609,16 +632,52 @@ static int mt6323_component_probe(struct snd_soc_component *component)
 	return 0;
 }
 
-/* Remember the capture rate: the PMIC UL interface is rate-configured. */
+/* Stock GetDLFrequency / GetDLNewIFFrequency use different rate codes. */
+static const struct {
+	unsigned int rate;
+	unsigned int dl;
+	unsigned int newif;
+} mt6323_dl_rates[] = {
+	{ 8000,  0, 0 },
+	{ 11025, 1, 1 },
+	{ 12000, 2, 2 },
+	{ 16000, 4, 3 },
+	{ 22050, 5, 4 },
+	{ 24000, 6, 5 },
+	{ 32000, 8, 6 },
+	{ 44100, 9, 7 },
+	{ 48000, 10, 8 },
+};
+
 static int mt6323_hw_params(struct snd_soc_component *component,
 			    struct snd_pcm_substream *substream,
 			    struct snd_pcm_hw_params *params)
 {
 	struct mt6323_codec_priv *priv = snd_soc_component_get_drvdata(component);
+	unsigned int rate = params_rate(params);
+	int i, ret;
 
-	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
-		priv->mic_rate = params_rate(params);
-	return 0;
+	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
+		priv->mic_rate = rate;
+		return 0;
+	}
+	for (i = 0; i < ARRAY_SIZE(mt6323_dl_rates); i++)
+		if (mt6323_dl_rates[i].rate == rate)
+			break;
+	if (i == ARRAY_SIZE(mt6323_dl_rates))
+		return -EINVAL;
+
+	mutex_lock(&priv->newif_lock);
+	ret = regmap_write(priv->regmap, ABB_AFE_PMIC_NEWIF_CFG0,
+			   (mt6323_dl_rates[i].newif << 12) | 0x0330);
+	if (!ret)
+		ret = regmap_update_bits(priv->regmap, ABB_AFE_CON(1), 0x000f,
+					 mt6323_dl_rates[i].dl);
+	/* First power-up triggers after AUDCLK; a warm reopen needs it here. */
+	if (!ret && priv->dl_pwr)
+		ret = mt6323_top_trigger(priv);
+	mutex_unlock(&priv->newif_lock);
+	return ret;
 }
 
 static const struct snd_soc_component_driver mt6323_soc_component_driver = {
@@ -665,6 +724,7 @@ static int mt6323_codec_probe(struct platform_device *pdev)
 
 	priv->dev = &pdev->dev;
 	priv->regmap = mt6397->regmap;
+	mutex_init(&priv->newif_lock);
 	if (IS_ERR(priv->regmap))
 		return PTR_ERR(priv->regmap);
 	priv->mic_mux = 0;		/* MIC1, the vendor single-mic default */
