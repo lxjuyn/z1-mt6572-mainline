@@ -543,7 +543,8 @@ static const struct snd_soc_dapm_route mt6323_dapm_routes[] = {
 	 * Feed the switch from the supply instead (same power-up ordering), and
 	 * carry the signal through the switch to the capture endpoint.  Making
 	 * AIF1 Capture depend on MIC UL alone powers the hardware but leaves the
-	 * MIC Input signal path disconnected from the DAI. */
+	 * MIC Input signal path disconnected from the DAI.
+	 */
 	{ "MIC Route", NULL, "MIC UL" },
 	{ "AIF1 Capture", NULL, "MIC Route" },
 };
