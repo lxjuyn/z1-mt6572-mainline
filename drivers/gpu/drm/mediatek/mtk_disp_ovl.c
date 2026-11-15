@@ -184,6 +184,9 @@ static irqreturn_t mtk_disp_ovl_irq_handler(int irq, void *dev_id)
 	struct mtk_disp_ovl *priv = dev_id;
 	u32 reg = readl(priv->regs + DISP_REG_OVL_INTSTA);
 
+	if (!reg)
+		return IRQ_NONE;
+
 	if (reg & OVL_FME_UND)
 		pr_err("OVL: OVL frame underflow\n");
 	if (reg & OVL_RDMA0_EOF_ABNORMAL)
@@ -195,13 +198,12 @@ static irqreturn_t mtk_disp_ovl_irq_handler(int irq, void *dev_id)
 	if (reg & OVL_RDMA1_FIFO_UND)
 		pr_err("OVL: RDMA1 FIFO underflow\n");
 
-	/* Clear frame completion interrupt */
+	/* Acknowledge both frame completion and diagnostic interrupts. */
 	writel(0x0, priv->regs + DISP_REG_OVL_INTSTA);
 
-	if (!priv->vblank_cb)
-		return IRQ_NONE;
-
-	priv->vblank_cb(priv->vblank_cb_data);
+	/* Error-only interrupts must not complete a pending page flip/fence. */
+	if ((reg & OVL_FME_CPL_INT) && priv->vblank_cb)
+		priv->vblank_cb(priv->vblank_cb_data);
 
 	return IRQ_HANDLED;
 }
