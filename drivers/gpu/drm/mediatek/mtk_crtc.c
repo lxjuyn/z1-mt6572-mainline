@@ -4,6 +4,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/dma-fence.h>
 #include <linux/dma-mapping.h>
 #include <linux/mailbox_controller.h>
 #include <linux/of.h>
@@ -16,6 +17,7 @@
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_framebuffer.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
@@ -45,6 +47,7 @@ struct mtk_crtc {
 
 	bool				pending_needs_vblank;
 	struct drm_pending_vblank_event	*event;
+	bool				event_vblank_ref;
 
 	struct drm_plane		*planes;
 	unsigned int			layer_nr;
@@ -72,6 +75,10 @@ struct mtk_crtc {
 	bool				config_updating;
 	/* lock for config_updating to cmd buffer */
 	spinlock_t			config_lock;
+	/* A failed CPU shadow update freezes scanout until reboot. */
+	int				config_error;
+	struct drm_framebuffer		**failed_fbs;
+	struct drm_framebuffer		**failed_async_fbs;
 };
 
 struct mtk_crtc_state {
@@ -100,11 +107,112 @@ static void mtk_crtc_finish_page_flip(struct mtk_crtc *mtk_crtc)
 
 	if (mtk_crtc->event) {
 		spin_lock_irqsave(&crtc->dev->event_lock, flags);
+		if (mtk_crtc->config_error && mtk_crtc->event->base.fence)
+			dma_fence_set_error(mtk_crtc->event->base.fence,
+					    mtk_crtc->config_error);
 		drm_crtc_send_vblank_event(crtc, mtk_crtc->event);
-		drm_crtc_vblank_put(crtc);
+		if (mtk_crtc->event_vblank_ref)
+			drm_crtc_vblank_put(crtc);
+		mtk_crtc->event_vblank_ref = false;
 		mtk_crtc->event = NULL;
 		spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
 	}
+}
+
+/* Called before error completion lets the atomic helper clean up old FBs. */
+static void mtk_crtc_fail_config_locked(struct mtk_crtc *mtk_crtc,
+				       struct drm_atomic_state *state, int error)
+{
+	struct drm_crtc *crtc = &mtk_crtc->base;
+	struct drm_crtc_state *crtc_state;
+	unsigned long flags;
+	unsigned int i;
+
+	lockdep_assert_held(&mtk_crtc->config_lock);
+
+	if (!mtk_crtc->config_error) {
+		/*
+		 * Software state has already been swapped, but failed acquisition
+		 * leaves the old frame scanning. Include unchanged planes too: they
+		 * need not appear in this atomic state. No allocation at failure.
+		 *
+		 * Keep these bounded references until reboot, including across DRM
+		 * FD close, disable and driver teardown. Releasing them requires a
+		 * separately verified DMA stop/reset; a failed shadow update or a
+		 * later frame IRQ does not prove that the old frame stopped.
+		 */
+		for (i = 0; i < mtk_crtc->layer_nr; i++) {
+			struct drm_plane *plane = &mtk_crtc->planes[i];
+			struct drm_plane_state *old;
+
+			if (state->async_update)
+				old = drm_atomic_get_new_plane_state(state, plane);
+			else
+				old = drm_atomic_get_old_plane_state(state, plane);
+			if (!old)
+				old = plane->state;
+			if (old && old->crtc == crtc && old->fb) {
+				drm_framebuffer_get(old->fb);
+				mtk_crtc->failed_fbs[i] = old->fb;
+			}
+		}
+		WRITE_ONCE(mtk_crtc->config_error, error);
+		drm_err(crtc->dev, "CRTC %u configuration failed: %d; reboot required\n",
+			drm_crtc_index(crtc), error);
+	}
+
+	/*
+	 * Legacy cursor async swaps its FB before taking hw_lock. It can have
+	 * swapped while another plane's update was timing out, so that update
+	 * may have pinned the new cursor FB, not the still-scanning old one.
+	 * Preserve the async state's swapped-out FB even after an earlier fault.
+	 * Plane modeset locking allows only one such in-flight update per plane;
+	 * later checks reject config_error, so one extra slot per plane suffices.
+	 */
+	if (state->async_update) {
+		for (i = 0; i < mtk_crtc->layer_nr; i++) {
+			struct drm_plane_state *old;
+
+			old = drm_atomic_get_new_plane_state(state, &mtk_crtc->planes[i]);
+			if (old && old->crtc == crtc && old->fb &&
+			    !mtk_crtc->failed_async_fbs[i] &&
+			    old->fb != mtk_crtc->failed_fbs[i]) {
+				drm_framebuffer_get(old->fb);
+				mtk_crtc->failed_async_fbs[i] = old->fb;
+			}
+		}
+	}
+
+	mtk_crtc->pending_needs_vblank = false;
+	mtk_crtc->config_updating = false;
+	mtk_crtc_finish_page_flip(mtk_crtc);
+
+	/* A queued or disabling state has not taken a vblank reference yet. */
+	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
+	if (crtc_state && crtc_state->event) {
+		spin_lock_irqsave(&crtc->dev->event_lock, flags);
+		if (crtc_state->event->base.fence)
+			dma_fence_set_error(crtc_state->event->base.fence,
+					    mtk_crtc->config_error);
+		drm_crtc_send_vblank_event(crtc, crtc_state->event);
+		crtc_state->event = NULL;
+		spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
+	}
+}
+
+static bool mtk_crtc_config_failed(struct mtk_crtc *mtk_crtc,
+				 struct drm_atomic_state *state)
+{
+	unsigned long flags;
+	bool failed;
+
+	spin_lock_irqsave(&mtk_crtc->config_lock, flags);
+	failed = mtk_crtc->config_error != 0;
+	if (failed)
+		mtk_crtc_fail_config_locked(mtk_crtc, state,
+					    mtk_crtc->config_error);
+	spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
+	return failed;
 }
 
 static void mtk_drm_finish_page_flip(struct mtk_crtc *mtk_crtc)
@@ -119,7 +227,8 @@ static void mtk_drm_finish_page_flip(struct mtk_crtc *mtk_crtc)
 #endif
 
 	spin_lock_irqsave(&mtk_crtc->config_lock, flags);
-	if (!mtk_crtc->config_updating && mtk_crtc->pending_needs_vblank) {
+	if (!mtk_crtc->config_error && !mtk_crtc->config_updating &&
+	    mtk_crtc->pending_needs_vblank) {
 		mtk_crtc_finish_page_flip(mtk_crtc);
 		mtk_crtc->pending_needs_vblank = false;
 	}
@@ -131,6 +240,7 @@ static void mtk_crtc_destroy(struct drm_crtc *crtc)
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	int i;
 
+	/* failed_fbs deliberately remain pinned: DMA stop was not confirmed. */
 	mtk_mutex_put(mtk_crtc->mutex);
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	if (mtk_crtc->cmdq_client.chan) {
@@ -446,6 +556,9 @@ static void mtk_crtc_ddp_hw_fini(struct mtk_crtc *mtk_crtc)
 	unsigned long flags;
 	int i;
 
+	if (READ_ONCE(mtk_crtc->config_error))
+		return;
+
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
 		mtk_ddp_comp_stop(mtk_crtc->ddp_comp[i]);
 		if (i == 1)
@@ -555,7 +668,8 @@ static void mtk_crtc_ddp_config(struct drm_crtc *crtc,
 	}
 }
 
-static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
+static int mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank,
+				  struct drm_atomic_state *state)
 {
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	struct cmdq_pkt *cmdq_handle = &mtk_crtc->cmdq_handle;
@@ -563,17 +677,22 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 	struct drm_crtc *crtc = &mtk_crtc->base;
 	struct mtk_drm_private *priv = crtc->dev->dev_private;
 	unsigned int pending_planes = 0, pending_async_planes = 0;
-	int i;
+	int i, ret = 0;
 	unsigned long flags;
 
 	mutex_lock(&mtk_crtc->hw_lock);
 
 	spin_lock_irqsave(&mtk_crtc->config_lock, flags);
+	if (mtk_crtc->config_error) {
+		ret = mtk_crtc->config_error;
+		mtk_crtc_fail_config_locked(mtk_crtc, state, ret);
+		spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
+		goto update_config_out;
+	}
 	mtk_crtc->config_updating = true;
-	spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
-
 	if (needs_vblank)
 		mtk_crtc->pending_needs_vblank = true;
+	spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
 
 	for (i = 0; i < mtk_crtc->layer_nr; i++) {
 		struct drm_plane *plane = &mtk_crtc->planes[i];
@@ -596,7 +715,23 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 		mtk_crtc->pending_async_planes = true;
 
 	if (priv->data->shadow_register) {
-		mtk_mutex_acquire(mtk_crtc->mutex);
+		ret = mtk_mutex_acquire(mtk_crtc->mutex);
+		if (ret) {
+			spin_lock_irqsave(&mtk_crtc->config_lock, flags);
+			mtk_crtc_fail_config_locked(mtk_crtc, state, ret);
+			spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
+			goto update_config_out;
+		}
+	}
+
+	/* Do not touch color registers before successful shadow acquisition. */
+	if (crtc->state->color_mgmt_changed)
+		for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
+			mtk_ddp_gamma_set(mtk_crtc->ddp_comp[i], crtc->state);
+			mtk_ddp_ctm_set(mtk_crtc->ddp_comp[i], crtc->state);
+		}
+
+	if (priv->data->shadow_register) {
 		mtk_crtc_ddp_config(crtc, NULL);
 		mtk_mutex_release(mtk_crtc->mutex);
 	}
@@ -637,10 +772,9 @@ static void mtk_crtc_update_config(struct mtk_crtc *mtk_crtc, bool needs_vblank)
 	mtk_crtc->config_updating = false;
 	spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
 
-#if IS_REACHABLE(CONFIG_MTK_CMDQ)
 update_config_out:
-#endif
 	mutex_unlock(&mtk_crtc->hw_lock);
+	return ret;
 }
 
 static void mtk_crtc_ddp_irq(void *data)
@@ -648,9 +782,14 @@ static void mtk_crtc_ddp_irq(void *data)
 	struct drm_crtc *crtc = data;
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct mtk_drm_private *priv = crtc->dev->dev_private;
-
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	struct drm_device *dev = mtk_crtc->base.dev;
+#endif
+
+	if (READ_ONCE(mtk_crtc->config_error))
+		goto finish;
+
+#if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	if (!priv->data->shadow_register && !mtk_crtc->cmdq_client.chan)
 		mtk_crtc_ddp_config(crtc, NULL);
 	else if (mtk_crtc->cmdq_vblank_cnt > 0 && --mtk_crtc->cmdq_vblank_cnt == 0)
@@ -660,6 +799,7 @@ static void mtk_crtc_ddp_irq(void *data)
 	if (!priv->data->shadow_register)
 		mtk_crtc_ddp_config(crtc, NULL);
 #endif
+finish:
 	mtk_drm_finish_page_flip(mtk_crtc);
 }
 
@@ -723,6 +863,10 @@ int mtk_crtc_plane_check(struct drm_crtc *crtc, struct drm_plane *plane,
 {
 	unsigned int local_layer;
 	struct mtk_ddp_comp *comp;
+	int error = READ_ONCE(to_mtk_crtc(crtc)->config_error);
+
+	if (error)
+		return error;
 
 	comp = mtk_ddp_comp_for_plane(crtc, plane, &local_layer);
 	if (comp)
@@ -730,7 +874,8 @@ int mtk_crtc_plane_check(struct drm_crtc *crtc, struct drm_plane *plane,
 	return 0;
 }
 
-void mtk_crtc_plane_disable(struct drm_crtc *crtc, struct drm_plane *plane)
+void mtk_crtc_plane_disable(struct drm_crtc *crtc, struct drm_plane *plane,
+			    struct drm_atomic_state *state)
 {
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
@@ -744,6 +889,9 @@ void mtk_crtc_plane_disable(struct drm_crtc *crtc, struct drm_plane *plane)
 	if (!mtk_crtc->enabled)
 		return;
 
+	if (mtk_crtc_config_failed(mtk_crtc, state))
+		return;
+
 	/* set pending plane state to disabled */
 	for (i = 0; i < mtk_crtc->layer_nr; i++) {
 		struct drm_plane *mtk_plane = &mtk_crtc->planes[i];
@@ -754,7 +902,8 @@ void mtk_crtc_plane_disable(struct drm_crtc *crtc, struct drm_plane *plane)
 			break;
 		}
 	}
-	mtk_crtc_update_config(mtk_crtc, false);
+	if (mtk_crtc_update_config(mtk_crtc, false, state))
+		return;
 
 	/* wait for planes to be disabled by CMDQ */
 	wait_event_timeout(mtk_crtc->cb_blocking_queue,
@@ -771,7 +920,7 @@ void mtk_crtc_async_update(struct drm_crtc *crtc, struct drm_plane *plane,
 	if (!mtk_crtc->enabled)
 		return;
 
-	mtk_crtc_update_config(mtk_crtc, false);
+	mtk_crtc_update_config(mtk_crtc, false, state);
 }
 
 static void mtk_crtc_atomic_enable(struct drm_crtc *crtc,
@@ -783,6 +932,9 @@ static void mtk_crtc_atomic_enable(struct drm_crtc *crtc,
 	int ret;
 
 	drm_dbg_driver(dev, "%s %d\n", __func__, crtc->base.id);
+
+	if (mtk_crtc_config_failed(mtk_crtc, state))
+		return;
 
 	ret = mtk_ddp_comp_power_on(comp);
 	if (ret < 0) {
@@ -811,6 +963,9 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 	int i;
 
 	drm_dbg_driver(dev, "%s %d\n", __func__, crtc->base.id);
+	if (mtk_crtc_config_failed(mtk_crtc, state))
+		return;
+
 	if (!mtk_crtc->enabled)
 		return;
 
@@ -825,7 +980,8 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 	}
 	mtk_crtc->pending_planes = true;
 
-	mtk_crtc_update_config(mtk_crtc, false);
+	if (mtk_crtc_update_config(mtk_crtc, false, state))
+		return;
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	/* Wait for planes to be disabled by cmdq */
 	if (mtk_crtc->cmdq_client.chan)
@@ -848,38 +1004,51 @@ static void mtk_crtc_atomic_begin(struct drm_crtc *crtc,
 {
 	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state,
 									  crtc);
-	struct mtk_crtc_state *mtk_crtc_state = to_mtk_crtc_state(crtc_state);
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
 	struct drm_device *dev = mtk_crtc->base.dev;
 	unsigned long flags;
+	int ret;
 
-	if (mtk_crtc->event && mtk_crtc_state->base.event)
-		drm_err(dev, "new event while there is still a pending event\n");
-
-	if (mtk_crtc_state->base.event) {
-		mtk_crtc_state->base.event->pipe = drm_crtc_index(crtc);
-		WARN_ON(drm_crtc_vblank_get(crtc) != 0);
-
-		spin_lock_irqsave(&crtc->dev->event_lock, flags);
-		mtk_crtc->event = mtk_crtc_state->base.event;
-		spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
-
-		mtk_crtc_state->base.event = NULL;
+	spin_lock_irqsave(&mtk_crtc->config_lock, flags);
+	if (mtk_crtc->config_error) {
+		mtk_crtc_fail_config_locked(mtk_crtc, state,
+					    mtk_crtc->config_error);
+		goto out;
 	}
+
+	if (mtk_crtc->event && crtc_state->event) {
+		drm_err(dev, "new event while there is still a pending event\n");
+		mtk_crtc_fail_config_locked(mtk_crtc, state, -EBUSY);
+		goto out;
+	}
+
+	if (crtc_state->event) {
+		crtc_state->event->pipe = drm_crtc_index(crtc);
+		ret = drm_crtc_vblank_get(crtc);
+		if (ret) {
+			mtk_crtc_fail_config_locked(mtk_crtc, state, ret);
+			goto out;
+		}
+		mtk_crtc->event_vblank_ref = true;
+		mtk_crtc->event = crtc_state->event;
+		crtc_state->event = NULL;
+	}
+out:
+	spin_unlock_irqrestore(&mtk_crtc->config_lock, flags);
+}
+
+static int mtk_crtc_atomic_check(struct drm_crtc *crtc,
+				 struct drm_atomic_state *state)
+{
+	return READ_ONCE(to_mtk_crtc(crtc)->config_error);
 }
 
 static void mtk_crtc_atomic_flush(struct drm_crtc *crtc,
 				  struct drm_atomic_state *state)
 {
 	struct mtk_crtc *mtk_crtc = to_mtk_crtc(crtc);
-	int i;
 
-	if (crtc->state->color_mgmt_changed)
-		for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
-			mtk_ddp_gamma_set(mtk_crtc->ddp_comp[i], crtc->state);
-			mtk_ddp_ctm_set(mtk_crtc->ddp_comp[i], crtc->state);
-		}
-	mtk_crtc_update_config(mtk_crtc, !!mtk_crtc->event);
+	mtk_crtc_update_config(mtk_crtc, !!mtk_crtc->event, state);
 }
 
 static const struct drm_crtc_funcs mtk_crtc_funcs = {
@@ -898,6 +1067,7 @@ static const struct drm_crtc_helper_funcs mtk_crtc_helper_funcs = {
 	.mode_set_nofb	= mtk_crtc_mode_set_nofb,
 	.mode_valid	= mtk_crtc_mode_valid,
 	.atomic_begin	= mtk_crtc_atomic_begin,
+	.atomic_check	= mtk_crtc_atomic_check,
 	.atomic_flush	= mtk_crtc_atomic_flush,
 	.atomic_enable	= mtk_crtc_atomic_enable,
 	.atomic_disable	= mtk_crtc_atomic_disable,
@@ -1096,6 +1266,17 @@ int mtk_crtc_create(struct drm_device *drm_dev, const unsigned int *path,
 	mtk_crtc->planes = devm_kcalloc(dev, num_comp_planes,
 					sizeof(struct drm_plane), GFP_KERNEL);
 	if (!mtk_crtc->planes)
+		return -ENOMEM;
+
+	mtk_crtc->failed_fbs = devm_kcalloc(dev, num_comp_planes,
+					    sizeof(*mtk_crtc->failed_fbs), GFP_KERNEL);
+	if (!mtk_crtc->failed_fbs)
+		return -ENOMEM;
+
+	mtk_crtc->failed_async_fbs = devm_kcalloc(dev, num_comp_planes,
+						  sizeof(*mtk_crtc->failed_async_fbs),
+						  GFP_KERNEL);
+	if (!mtk_crtc->failed_async_fbs)
 		return -ENOMEM;
 
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {

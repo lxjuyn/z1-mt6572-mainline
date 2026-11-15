@@ -1037,17 +1037,24 @@ void mtk_mutex_disable(struct mtk_mutex *mutex)
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_disable);
 
-void mtk_mutex_acquire(struct mtk_mutex *mutex)
+int mtk_mutex_acquire(struct mtk_mutex *mutex)
 {
 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
 						 mutex[mutex->id]);
 	u32 tmp;
+	int ret;
 
 	writel(1, mtx->regs + DISP_REG_MUTEX_EN(mutex->id));
 	writel(1, mtx->regs + DISP_REG_MUTEX(mutex->id));
-	if (readl_poll_timeout_atomic(mtx->regs + DISP_REG_MUTEX(mutex->id),
-				      tmp, tmp & INT_MUTEX, 1, 10000))
+	ret = readl_poll_timeout_atomic(mtx->regs + DISP_REG_MUTEX(mutex->id),
+					tmp, tmp & INT_MUTEX, 1, 10000);
+	if (ret) {
+		/* Cancel the request; callers must not program an unlocked frame. */
+		writel(0, mtx->regs + DISP_REG_MUTEX(mutex->id));
 		pr_err("could not acquire mutex %d\n", mutex->id);
+	}
+
+	return ret;
 }
 EXPORT_SYMBOL_GPL(mtk_mutex_acquire);
 

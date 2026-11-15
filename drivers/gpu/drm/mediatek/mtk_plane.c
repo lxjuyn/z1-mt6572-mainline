@@ -273,7 +273,7 @@ static void mtk_plane_atomic_disable(struct drm_plane *plane,
 	mtk_plane_state->pending.dirty = true;
 
 	if (old_state && old_state->crtc)
-		mtk_crtc_plane_disable(old_state->crtc, plane);
+		mtk_crtc_plane_disable(old_state->crtc, plane, state);
 }
 
 static void mtk_plane_atomic_update(struct drm_plane *plane,
