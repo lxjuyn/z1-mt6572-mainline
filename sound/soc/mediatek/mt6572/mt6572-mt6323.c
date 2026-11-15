@@ -27,6 +27,14 @@ static const struct snd_soc_dapm_widget mt6572_mt6323_widgets[] = {
 	SND_SOC_DAPM_SPK("Earpiece", NULL),
 };
 
+/* The codec owns the analog driver widgets while this card owns the board
+ * endpoints.  Without these cross-component edges DAPM can power the DAC but
+ * never reaches the physical speaker/earpiece sink. */
+static const struct snd_soc_dapm_route mt6572_mt6323_routes[] = {
+	{ "Speaker", NULL, "Speaker Driver" },
+	{ "Earpiece", NULL, "Earpiece Driver" },
+};
+
 /*
  * Lets userspace keep the speaker on with the headphones in; each jack event
  * re-applies the automatic route. The codec provides the Headphone switch.
@@ -153,6 +161,8 @@ static struct snd_soc_card mt6572_mt6323_card = {
 	.num_controls = ARRAY_SIZE(mt6572_mt6323_controls),
 	.dapm_widgets = mt6572_mt6323_widgets,
 	.num_dapm_widgets = ARRAY_SIZE(mt6572_mt6323_widgets),
+	.dapm_routes = mt6572_mt6323_routes,
+	.num_dapm_routes = ARRAY_SIZE(mt6572_mt6323_routes),
 };
 
 static const struct mtk_soundcard_pdata mt6572_card = {
