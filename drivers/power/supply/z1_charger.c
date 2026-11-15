@@ -649,6 +649,8 @@ static int z1_charger_probe(struct platform_device *pdev)
 		chg->have_vcdt = true;
 	}
 
+	/* Give the registered psy the DT identity used by power-supplies. */
+	cfg.fwnode = dev_fwnode(dev);
 	cfg.drv_data = chg;
 	chg->psy = devm_power_supply_register(dev, &z1_charger_desc, &cfg);
 	if (IS_ERR(chg->psy))
