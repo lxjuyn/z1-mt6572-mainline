@@ -480,8 +480,8 @@ static void z1_charger_apply(struct z1_charger *chg, bool online)
 
 	if (!online) {
 		if (chg->charging) {
-			z1_charger_disable(chg);
-			chg->charging = false;
+			if (!z1_charger_disable(chg))
+				chg->charging = false;
 		}
 		return;
 	}
@@ -496,10 +496,10 @@ static void z1_charger_apply(struct z1_charger *chg, bool online)
 	case Z1_TEMP_NO_SENSOR:
 		chg->uncal_warned = false;
 		if (chg->charging) {
-			dev_warn(chg->dev,
-				 "battery temp unreadable, stopping charge\n");
-			z1_charger_disable(chg);
-			chg->charging = false;
+			dev_warn_ratelimited(chg->dev,
+					     "battery temp unreadable, stopping charge\n");
+			if (!z1_charger_disable(chg))
+				chg->charging = false;
 		} else {
 			dev_dbg(chg->dev,
 				"battery temp unreadable, not charging\n");
@@ -522,8 +522,15 @@ static void z1_charger_apply(struct z1_charger *chg, bool online)
 	}
 
 	if (!chg->charging) {
-		if (!z1_charger_enable(chg))
+		if (!z1_charger_enable(chg)) {
 			chg->charging = true;
+		} else {
+			/*
+			 * A partly programmed enable may have armed the PMIC
+			 * watchdog even though CHR_EN never stuck.
+			 */
+			z1_charger_disable(chg);
+		}
 		return;
 	}
 

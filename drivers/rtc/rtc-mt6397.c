@@ -110,15 +110,12 @@ static int mtk_rtc_set_time(struct device *dev, struct rtc_time *tm)
 	int ret;
 	u16 data[RTC_OFFSET_COUNT];
 
-	tm->tm_mon++;
-	tm->tm_wday++;
-
 	data[RTC_OFFSET_SEC] = tm->tm_sec;
 	data[RTC_OFFSET_MIN] = tm->tm_min;
 	data[RTC_OFFSET_HOUR] = tm->tm_hour;
 	data[RTC_OFFSET_DOM] = tm->tm_mday;
-	data[RTC_OFFSET_DOW] = tm->tm_wday;
-	data[RTC_OFFSET_MTH] = tm->tm_mon;
+	data[RTC_OFFSET_DOW] = tm->tm_wday + 1;
+	data[RTC_OFFSET_MTH] = tm->tm_mon + 1;
 	data[RTC_OFFSET_YEAR] = tm->tm_year;
 
 	mutex_lock(&rtc->lock);
@@ -182,8 +179,6 @@ static int mtk_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alm)
 	int ret;
 	u16 data[RTC_OFFSET_COUNT];
 
-	tm->tm_mon++;
-
 	mutex_lock(&rtc->lock);
 	ret = regmap_bulk_read(rtc->regmap, rtc->addr_base + RTC_AL_SEC,
 			       data, RTC_OFFSET_COUNT);
@@ -199,7 +194,7 @@ static int mtk_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alm)
 	data[RTC_OFFSET_DOM] = ((data[RTC_OFFSET_DOM] & ~(RTC_AL_DOM_MASK)) |
 				(tm->tm_mday & RTC_AL_DOM_MASK));
 	data[RTC_OFFSET_MTH] = ((data[RTC_OFFSET_MTH] & ~(RTC_AL_MTH_MASK)) |
-				(tm->tm_mon & RTC_AL_MTH_MASK));
+				((tm->tm_mon + 1) & RTC_AL_MTH_MASK));
 	data[RTC_OFFSET_YEAR] = ((data[RTC_OFFSET_YEAR] & ~(RTC_AL_YEA_MASK)) |
 				(tm->tm_year & RTC_AL_YEA_MASK));
 

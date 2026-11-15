@@ -156,8 +156,8 @@ enum mtk_pmic_keys_lp_mode {
 	LP_TWOKEY,
 };
 
-static void mtk_pmic_keys_lp_reset_setup(struct mtk_pmic_keys *keys,
-					 const struct mtk_pmic_regs *regs)
+static int mtk_pmic_keys_lp_reset_setup(struct mtk_pmic_keys *keys,
+					const struct mtk_pmic_regs *regs)
 {
 	const struct mtk_pmic_keys_regs *kregs_home, *kregs_pwr;
 	u32 long_press_mode, long_press_debounce;
@@ -199,7 +199,7 @@ static void mtk_pmic_keys_lp_reset_setup(struct mtk_pmic_keys *keys,
 		break;
 	}
 
-	regmap_update_bits(keys->regmap, regs->pmic_rst_reg, mask, value);
+	return regmap_update_bits(keys->regmap, regs->pmic_rst_reg, mask, value);
 }
 
 static irqreturn_t mtk_pmic_keys_irq_handler_thread(int irq, void *data)
@@ -234,6 +234,7 @@ static int mtk_pmic_key_setup(struct mtk_pmic_keys *keys,
 	int ret;
 
 	info->keys = keys;
+	input_set_capability(keys->input_dev, EV_KEY, info->keycode);
 
 	ret = regmap_update_bits(keys->regmap, info->regs->intsel_reg,
 				 info->regs->intsel_mask,
@@ -246,7 +247,7 @@ static int mtk_pmic_key_setup(struct mtk_pmic_keys *keys,
 					IRQF_ONESHOT | IRQF_TRIGGER_HIGH,
 					"mtk-pmic-keys", info);
 	if (ret) {
-		dev_err(keys->dev, "Failed to request IRQ: %d: %d\n",
+		dev_err(keys->dev, "Failed to request IRQ %d: %d\n",
 			info->irq, ret);
 		return ret;
 	}
@@ -257,13 +258,12 @@ static int mtk_pmic_key_setup(struct mtk_pmic_keys *keys,
 						IRQF_ONESHOT | IRQF_TRIGGER_HIGH,
 						"mtk-pmic-keys", info);
 		if (ret) {
-			dev_err(keys->dev, "Failed to request IRQ_r: %d: %d\n",
-				info->irq, ret);
+			dev_err(keys->dev,
+				"Failed to request release IRQ %d: %d\n",
+				info->irq_r, ret);
 			return ret;
 		}
 	}
-
-	input_set_capability(keys->input_dev, EV_KEY, info->keycode);
 
 	return 0;
 }
@@ -411,7 +411,11 @@ static int mtk_pmic_keys_probe(struct platform_device *pdev)
 		return error;
 	}
 
-	mtk_pmic_keys_lp_reset_setup(keys, mtk_pmic_regs);
+	error = mtk_pmic_keys_lp_reset_setup(keys, mtk_pmic_regs);
+	if (error)
+		dev_warn(keys->dev,
+			 "failed to configure long-press reset: %d (continuing)\n",
+			 error);
 
 	platform_set_drvdata(pdev, keys);
 
