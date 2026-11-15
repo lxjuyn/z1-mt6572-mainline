@@ -181,6 +181,12 @@ enum z1_temp_gate {
  * IIO_CHAN_INFO_SCALE); power_supply voltage_now takes uV, same *1000
  * convention as generic-adc-battery. */
 
+/* Pending cleanup blocks all heartbeat/enable work. charging is cleared only
+ * after CHR_EN and CSDAC_EN have both been read back as zero; cleanup errors
+ * retain pending even after the master has stopped. A watchdog successfully
+ * armed by this driver is not disarmed until that stop is confirmed. Inherited
+ * LK watchdog state cannot be established while the bus is failing.
+ */
 struct z1_charger {
 	struct device *dev;
 	struct regmap *regmap;
@@ -191,6 +197,8 @@ struct z1_charger {
 	bool online;
 	bool have_vcdt;
 	bool charging;			/* charge enable bits applied */
+	bool disable_pending;		/* stop/cleanup must complete before enabling */
+	bool stopping;			/* remove/shutdown: never enable again */
 	bool uncal_warned;		/* TEMP gate: uncalibrated warning shown */
 	/* serialize regmap access from irq thread + poll work */
 	struct mutex lock;
@@ -199,6 +207,7 @@ struct z1_charger {
 static const char *const z1_charger_psy_name = "usb"; /* std name so the A9 health HAL isPowered() sees the charger */
 
 static void z1_charger_apply(struct z1_charger *chg, bool online);
+static int z1_charger_disable(struct z1_charger *chg);
 
 static int z1_charger_read_online(struct z1_charger *chg, bool *online)
 {
@@ -218,9 +227,14 @@ static void z1_charger_update(struct z1_charger *chg)
 	bool online;
 	int ret;
 
+	if (chg->stopping)
+		return;
+
 	ret = z1_charger_read_online(chg, &online);
 	if (ret) {
 		dev_err(chg->dev, "RGS_CHRDET read failed: %d\n", ret);
+		if (chg->disable_pending)
+			z1_charger_disable(chg);
 		return;
 	}
 
@@ -253,57 +267,81 @@ static int z1_charger_hw_init(struct z1_charger *chg)
 
 	ret = regmap_update_bits(map, MT6323_CHR_CON13,
 				 Z1_CHR_CON13_CHRWDT_TD_MASK, 0);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON13,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON13,
 				  Z1_CHR_CON13_CHRWDT_EN | Z1_CHR_CON13_CHRWDT_WR,
 				  Z1_CHR_CON13_CHRWDT_EN | Z1_CHR_CON13_CHRWDT_WR);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON15,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON15,
 				  Z1_CHR_CON15_CHRWDT_INT_EN,
 				  Z1_CHR_CON15_CHRWDT_INT_EN);
+	if (ret)
+		return ret;
 	/* Clear a latched charge-watchdog flag.  LK arms the same 4 s
 	 * watchdog in its power-off-charging path; by the time Linux
 	 * probes (~20 s later) it has long expired and the PMIC can
 	 * refuse CHR_EN until the flag is cleared.  The vendor
 	 * charging_reset_watch_dog_timer() writes this every time. */
-	ret |= regmap_update_bits(map, MT6323_CHR_CON15,
+	ret = regmap_update_bits(map, MT6323_CHR_CON15,
 				  Z1_CHR_CON15_CHRWDT_FLAG_WR,
 				  Z1_CHR_CON15_CHRWDT_FLAG_WR);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON6,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON6,
 				  Z1_CHR_CON6_VBAT_OV_EN |
 				  (Z1_CHR_CON6_VBAT_OV_VTH_MASK <<
 				   Z1_CHR_CON6_VBAT_OV_VTH_SHIFT),
 				  Z1_CHR_CON6_VBAT_OV_EN |
 				  (Z1_VBAT_OV_VTH_4V3 <<
 				   Z1_CHR_CON6_VBAT_OV_VTH_SHIFT));
-	ret |= regmap_update_bits(map, MT6323_CHR_CON1,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON1,
 				  Z1_CHR_CON1_VCDT_HV_EN,
 				  Z1_CHR_CON1_VCDT_HV_EN);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON16,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON16,
 				  Z1_CHR_CON16_USBDL_SET |
 				  Z1_CHR_CON16_USBDL_RST,
 				  Z1_CHR_CON16_USBDL_RST);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON18,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON18,
 				  Z1_CHR_CON18_BC11_BB_CTRL |
 				  Z1_CHR_CON18_BC11_RST,
 				  Z1_CHR_CON18_BC11_BB_CTRL |
 				  Z1_CHR_CON18_BC11_RST);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON23,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON23,
 				  Z1_CHR_CON23_CSDAC_MODE |
 				  Z1_CHR_CON23_ULC_DET_EN,
 				  Z1_CHR_CON23_CSDAC_MODE |
 				  Z1_CHR_CON23_ULC_DET_EN);
+	if (ret)
+		return ret;
 	/* Vendor hw_init also clears these two; we never wrote them. */
-	ret |= regmap_update_bits(map, MT6323_CHR_CON23,
+	ret = regmap_update_bits(map, MT6323_CHR_CON23,
 				  Z1_CHR_CON23_VCDT_MODE, 0);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON7,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON7,
 				  Z1_CHR_CON7_BATON_EN,
 				  Z1_CHR_CON7_BATON_EN);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON7,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON7,
 				  Z1_CHR_CON7_BATON_HT_EN, 0);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON22,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON22,
 				  Z1_CHR_CON22_LOW_ICH_DB_MASK, 1);
 	if (ret)
-		dev_err(chg->dev, "charger hw_init regmap error: %d\n", ret);
-	return ret;
+		return ret;
+	return 0;
 }
 
 /* Vendor charging_enable() TRUE branch + CV/CC setpoints, bit for bit. */
@@ -314,87 +352,82 @@ static int z1_charger_enable(struct z1_charger *chg)
 	int i, ret;
 
 	ret = z1_charger_hw_init(chg);
+	if (ret)
+		return ret;
 
-	ret |= regmap_update_bits(map, MT6323_CHR_CON21,
+	ret = regmap_update_bits(map, MT6323_CHR_CON21,
 				  Z1_CHR_CON21_CSDAC_DLY_MASK, 0x4);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON21,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON21,
 				  Z1_CHR_CON21_CSDAC_STP_MASK <<
 				  Z1_CHR_CON21_CSDAC_STP_SHIFT,
 				  0x1 << Z1_CHR_CON21_CSDAC_STP_SHIFT);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON20,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON20,
 				  Z1_CHR_CON20_CSDAC_STP_INC_MASK, 0x1);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON20,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON20,
 				  Z1_CHR_CON20_CSDAC_STP_DEC_MASK <<
 				  Z1_CHR_CON20_CSDAC_STP_DEC_SHIFT,
 				  0x2 << Z1_CHR_CON20_CSDAC_STP_DEC_SHIFT);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON2,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON2,
 				  Z1_CHR_CON2_CS_EN, Z1_CHR_CON2_CS_EN);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON23,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON23,
 				  Z1_CHR_CON23_HWCV_EN,
 				  Z1_CHR_CON23_HWCV_EN);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON2,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON2,
 				  Z1_CHR_CON2_VBAT_CV_EN,
 				  Z1_CHR_CON2_VBAT_CV_EN);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON3,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON3,
 				  Z1_CHR_CON3_VBAT_CV_VTH_MASK,
 				  Z1_CV_VTH_4V2);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON4,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON4,
 				  Z1_CHR_CON4_CS_VTH_MASK,
 				  Z1_CS_VTH_450MA);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON10,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON10,
 				  Z1_CHR_CON10_PCHR_FLAG_EN,
 				  Z1_CHR_CON10_PCHR_FLAG_EN);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON0,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON0,
 				  Z1_CHR_CON0_CSDAC_EN | Z1_CHR_CON0_CHR_EN,
 				  Z1_CHR_CON0_CSDAC_EN | Z1_CHR_CON0_CHR_EN);
-
-	if (ret) {
-		dev_err(chg->dev, "charge-enable sequence failed: %d\n", ret);
+	if (ret)
 		return ret;
-	}
 
-	/* VERIFY the master enable bit instead of merely printing it.
-	 * Board logs 2026-11-05 showed this exact sequence returning 0 from
-	 * every regmap call while CHR_CON0 still read 0x006b (bit4 CHR_EN
-	 * clear) and CSDAC stayed 0 -- i.e. the driver claimed "charging
-	 * ENABLED" while the hardware was not charging.  The old code only
-	 * dumped the value and could never notice.  Retry the master write a
-	 * few times, then fail loudly so the 2 s poll re-runs the whole
-	 * sequence instead of latching chg->charging = true forever. */
+	/* Every retry has a readback, including the final master write. */
 	for (i = 0; i < 3; i++) {
-		if (!regmap_read(map, MT6323_CHR_CON0, &c0) &&
-		    (c0 & Z1_CHR_CON0_CHR_EN))
+		ret = regmap_read(map, MT6323_CHR_CON0, &c0);
+		if (ret)
+			return ret;
+		if ((c0 & (Z1_CHR_CON0_CHR_EN | Z1_CHR_CON0_CSDAC_EN)) ==
+		    (Z1_CHR_CON0_CHR_EN | Z1_CHR_CON0_CSDAC_EN))
 			break;
-		dev_warn_ratelimited(chg->dev,
-				     "CHR_EN did not stick (CHR_CON0=0x%04x), retry %d\n",
-				     c0, i + 1);
-		ret |= regmap_update_bits(map, MT6323_CHR_CON0,
-					  Z1_CHR_CON0_CSDAC_EN |
-					  Z1_CHR_CON0_CHR_EN,
-					  Z1_CHR_CON0_CSDAC_EN |
-					  Z1_CHR_CON0_CHR_EN);
-	}
-
-	if (ret || !(c0 & Z1_CHR_CON0_CHR_EN)) {
-		dev_err_ratelimited(chg->dev,
-			"charge enable FAILED: CHR_EN never set (CHR_CON0=0x%04x, ret=%d)\n",
-			c0, ret);
-		/* One-shot full dump of the charger block, vendor loop
-		 * (charging_hw_pmic.c:585-597): CON0..CON29 step 2.  This
-		 * is the evidence the next boot needs to tell "pwrap write
-		 * dropped" from "PMIC refuses CHR_EN". */
-		{
-			unsigned int v;
-			int r;
-
-			for (r = 0; r <= 0x2e; r += 2) {
-				if (!regmap_read(map, r, &v))
-					dev_err_once(chg->dev,
-						"CHR_CON%d(0x%04x)=0x%04x\n",
-						r, r, v);
-			}
+		if (i == 2) {
+			dev_err_ratelimited(chg->dev,
+				"charge enable did not stick (CHR_CON0=0x%04x)\n", c0);
+			return -EIO;
 		}
-		return -EIO;
+		ret = regmap_update_bits(map, MT6323_CHR_CON0,
+					 Z1_CHR_CON0_CSDAC_EN | Z1_CHR_CON0_CHR_EN,
+					 Z1_CHR_CON0_CSDAC_EN | Z1_CHR_CON0_CHR_EN);
+		if (ret)
+			return ret;
 	}
 
 	if (!regmap_read(map, MT6323_CHR_CON8, &c8))
@@ -404,26 +437,42 @@ static int z1_charger_enable(struct z1_charger *chg)
 	return 0;
 }
 
-/* Vendor charging_enable() FALSE branch.  Watchdog off too, so a stray
- * partial enable cannot outlive this call. */
+/* Confirm the master enable is off before disarming its watchdog. */
 static int z1_charger_disable(struct z1_charger *chg)
 {
 	struct regmap *map = chg->regmap;
+	unsigned int c0;
 	int ret;
 
-	ret  = regmap_update_bits(map, MT6323_CHR_CON15,
-				  Z1_CHR_CON15_CHRWDT_INT_EN |
-				  Z1_CHR_CON15_CHRWDT_FLAG_WR, 0);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON13,
-				  Z1_CHR_CON13_CHRWDT_EN, 0);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON0,
-				  Z1_CHR_CON0_CSDAC_EN | Z1_CHR_CON0_CHR_EN, 0);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON23,
-				  Z1_CHR_CON23_HWCV_EN, 0);
+	chg->disable_pending = true;
+	ret = regmap_update_bits(map, MT6323_CHR_CON0,
+				 Z1_CHR_CON0_CSDAC_EN | Z1_CHR_CON0_CHR_EN, 0);
 	if (ret)
-		dev_err(chg->dev, "charge-disable sequence failed: %d\n", ret);
-	else
-		dev_info(chg->dev, "charging DISABLED\n");
+		goto out;
+	ret = regmap_read(map, MT6323_CHR_CON0, &c0);
+	if (ret)
+		goto out;
+	if (c0 & (Z1_CHR_CON0_CSDAC_EN | Z1_CHR_CON0_CHR_EN)) {
+		ret = -EIO;
+		goto out;
+	}
+	chg->charging = false;
+	ret = regmap_update_bits(map, MT6323_CHR_CON23, Z1_CHR_CON23_HWCV_EN, 0);
+	if (ret)
+		goto out;
+	ret = regmap_update_bits(map, MT6323_CHR_CON15,
+				 Z1_CHR_CON15_CHRWDT_INT_EN |
+				 Z1_CHR_CON15_CHRWDT_FLAG_WR, 0);
+	if (ret)
+		goto out;
+	ret = regmap_update_bits(map, MT6323_CHR_CON13, Z1_CHR_CON13_CHRWDT_EN, 0);
+	if (ret)
+		goto out;
+	chg->disable_pending = false;
+	dev_info(chg->dev, "charging DISABLED (read back)\n");
+out:
+	if (ret)
+		dev_err_ratelimited(chg->dev, "charge-disable pending: %d\n", ret);
 	return ret;
 }
 
@@ -434,19 +483,27 @@ static int z1_charger_feed_wdt(struct z1_charger *chg)
 	struct regmap *map = chg->regmap;
 	int ret;
 
-	ret  = regmap_update_bits(map, MT6323_CHR_CON13,
+	ret = regmap_update_bits(map, MT6323_CHR_CON13,
 				  Z1_CHR_CON13_CHRWDT_TD_MASK, 0);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON13,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON13,
 				  Z1_CHR_CON13_CHRWDT_WR |
 				  Z1_CHR_CON13_CHRWDT_EN,
 				  Z1_CHR_CON13_CHRWDT_WR |
 				  Z1_CHR_CON13_CHRWDT_EN);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON15,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON15,
 				  Z1_CHR_CON15_CHRWDT_INT_EN,
 				  Z1_CHR_CON15_CHRWDT_INT_EN);
-	ret |= regmap_update_bits(map, MT6323_CHR_CON15,
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, MT6323_CHR_CON15,
 				  Z1_CHR_CON15_CHRWDT_FLAG_WR,
 				  Z1_CHR_CON15_CHRWDT_FLAG_WR);
+	if (ret)
+		return ret;
 	return ret;
 }
 
@@ -476,13 +533,18 @@ static enum z1_temp_gate z1_charger_temp_check(struct z1_charger *chg,
  * path when the charger leaves or the gate says no. */
 static void z1_charger_apply(struct z1_charger *chg, bool online)
 {
+	unsigned int c0;
 	int temp = INT_MIN;
 
+	if (chg->stopping)
+		return;
+
+	if (chg->disable_pending && z1_charger_disable(chg))
+		return;
+
 	if (!online) {
-		if (chg->charging) {
-			if (!z1_charger_disable(chg))
-				chg->charging = false;
-		}
+		if (chg->charging)
+			z1_charger_disable(chg);
 		return;
 	}
 
@@ -498,8 +560,7 @@ static void z1_charger_apply(struct z1_charger *chg, bool online)
 		if (chg->charging) {
 			dev_warn_ratelimited(chg->dev,
 					     "battery temp unreadable, stopping charge\n");
-			if (!z1_charger_disable(chg))
-				chg->charging = false;
+			z1_charger_disable(chg);
 		} else {
 			dev_dbg(chg->dev,
 				"battery temp unreadable, not charging\n");
@@ -522,8 +583,11 @@ static void z1_charger_apply(struct z1_charger *chg, bool online)
 	}
 
 	if (!chg->charging) {
+		/* Failure may leave an unknown partial enable: always finish stop. */
+		chg->disable_pending = true;
 		if (!z1_charger_enable(chg)) {
 			chg->charging = true;
+			chg->disable_pending = false;
 		} else {
 			/*
 			 * A partly programmed enable may have armed the PMIC
@@ -534,10 +598,23 @@ static void z1_charger_apply(struct z1_charger *chg, bool online)
 		return;
 	}
 
+	/* A 4 s watchdog expiry can clear CHR_EN between 2 s poll ticks. */
+	if (regmap_read(chg->regmap, MT6323_CHR_CON0, &c0)) {
+		chg->disable_pending = true;
+		return;
+	}
+	if ((c0 & (Z1_CHR_CON0_CHR_EN | Z1_CHR_CON0_CSDAC_EN)) !=
+	    (Z1_CHR_CON0_CHR_EN | Z1_CHR_CON0_CSDAC_EN)) {
+		chg->disable_pending = true;
+		return;
+	}
+
 	/* Already enabled: heartbeat.  If the feed ever fails repeatedly
 	 * the 4 s watchdog cuts charging by itself (safe direction). */
-	if (z1_charger_feed_wdt(chg))
+	if (z1_charger_feed_wdt(chg)) {
 		dev_err_ratelimited(chg->dev, "watchdog feed failed\n");
+		chg->disable_pending = true;
+	}
 }
 
 static int z1_charger_get_property(struct power_supply *psy,
@@ -664,22 +741,31 @@ static int z1_charger_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(chg->psy),
 				     "failed to register USB power_supply\n");
 
-	/* Initial state + one-shot forensics dump (CHRSTATUS bit map: see
-	 * driver header comment; bit4 PCHR_CHRDET, bit3 VBAT_OV,
-	 * bit5 RO_BATON_UNDET). */
-	ret = regmap_read(chg->regmap, MT6323_CHR_CON0, &dump0);
-	if (!ret)
-		ret = regmap_read(chg->regmap, MT6323_CHRSTATUS, &dump142);
+	ret = devm_delayed_work_autocancel(dev, &chg->poll_work,
+					   z1_charger_poll_work);
 	if (ret)
 		return dev_err_probe(dev, ret,
-				     "PMIC charger regs unreadable\n");
+				     "failed to alloc poll work\n");
 
-	chg->online = !!(dump0 & BIT(Z1_CHR_CON0_RGS_CHRDET_SHIFT));
-	dev_info(dev,
-		 "MT6323 charger detect: CHR_CON0(0x%04x)=0x%04x -> RGS_CHRDET[5]=%d; CHRSTATUS(0x%04x)=0x%04x (PCHR_CHRDET[4]=%d)\n",
-		 MT6323_CHR_CON0, dump0, chg->online,
-		 MT6323_CHRSTATUS, dump142,
-		 !!(dump142 & BIT(4)));
+	/* From here probe always succeeds: pending cleanup has a live worker.
+	 * Treat inherited LK state as unknown, even if diagnostics cannot read it.
+	 */
+	chg->disable_pending = true;
+	ret = regmap_read(chg->regmap, MT6323_CHR_CON0, &dump0);
+	if (!ret) {
+		chg->online = !!(dump0 & BIT(Z1_CHR_CON0_RGS_CHRDET_SHIFT));
+		chg->charging = !!(dump0 & (Z1_CHR_CON0_CHR_EN |
+					 Z1_CHR_CON0_CSDAC_EN));
+		dev_info(dev, "initial CHR_CON0=0x%04x, online=%d\n",
+			 dump0, chg->online);
+	} else {
+		dev_warn(dev, "initial CHR_CON0 read failed: %d, retrying cleanup\n", ret);
+	}
+	if (!regmap_read(chg->regmap, MT6323_CHRSTATUS, &dump142))
+		dev_info(dev, "initial CHRSTATUS=0x%04x\n", dump142);
+	mutex_lock(&chg->lock);
+	z1_charger_disable(chg);
+	mutex_unlock(&chg->lock);
 
 	/* PMIC CHRDET IRQ (hwirq 10) is optional: the mt6397 irq domain has
 	 * no explicit xlate so the default takes specifier[0] as hwirq
@@ -705,13 +791,6 @@ static int z1_charger_probe(struct platform_device *pdev)
 	} else {
 		dev_warn(dev, "no CHRDET irq in DT, polling only\n");
 	}
-
-	ret = devm_delayed_work_autocancel(dev, &chg->poll_work,
-					   z1_charger_poll_work);
-	if (ret)
-		return dev_err_probe(dev, ret,
-				     "failed to alloc poll work\n");
-
 	schedule_delayed_work(&chg->poll_work,
 			      msecs_to_jiffies(Z1_CHARGER_POLL_MS));
 
@@ -724,21 +803,30 @@ static const struct of_device_id z1_charger_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, z1_charger_of_match);
 
+static void z1_charger_stop(struct z1_charger *chg)
+{
+	/* Block IRQ-driven enable before cancelling the polling worker. */
+	mutex_lock(&chg->lock);
+	chg->stopping = true;
+	mutex_unlock(&chg->lock);
+	cancel_delayed_work_sync(&chg->poll_work);
+	mutex_lock(&chg->lock);
+	z1_charger_disable(chg);
+	mutex_unlock(&chg->lock);
+}
+
 static void z1_charger_remove(struct platform_device *pdev)
 {
 	struct z1_charger *chg = platform_get_drvdata(pdev);
 
-	/* The devm-managed poll work is cancelled after .remove; stop it
-	 * here first so it cannot re-enable charging behind our back, then
-	 * take the vendor disable path.  If any of this never runs, the
-	 * still-armed 4 s watchdog cuts charging on its own. */
-	cancel_delayed_work_sync(&chg->poll_work);
-	mutex_lock(&chg->lock);
-	z1_charger_disable(chg);
-	chg->charging = false;
-	mutex_unlock(&chg->lock);
+	z1_charger_stop(chg);
 	if (chg->bat_psy)
 		power_supply_put(chg->bat_psy);
+}
+
+static void z1_charger_shutdown(struct platform_device *pdev)
+{
+	z1_charger_stop(platform_get_drvdata(pdev));
 }
 
 static struct platform_driver z1_charger_driver = {
@@ -748,6 +836,7 @@ static struct platform_driver z1_charger_driver = {
 	},
 	.probe = z1_charger_probe,
 	.remove = z1_charger_remove,
+	.shutdown = z1_charger_shutdown,
 };
 module_platform_driver(z1_charger_driver);
 
