@@ -560,6 +560,10 @@ struct msdc_host {
 	u32 cq_ssc1_time;
 };
 
+static bool z1_disable_emmc_hsq;
+module_param(z1_disable_emmc_hsq, bool, 0444);
+MODULE_PARM_DESC(z1_disable_emmc_hsq, "Disable HSQ on the MT6572 non-removable eMMC for diagnosis");
+
 static const struct mtk_mmc_compatible mt6572_compat = {
 	.clk_div_bits = 8,
 	.recheck_sdio_irq = true,
@@ -3927,6 +3931,10 @@ static int msdc_drv_probe(struct platform_device *pdev)
 		mmc->max_seg_size = 64 * 1024;
 		/* Reduce CIT to 0x40 that corresponds to 2.35us */
 		msdc_cqe_cit_cal(host, 2350);
+	} else if (z1_disable_emmc_hsq && host->dev_comp == &mt6572_compat &&
+		   (mmc->caps & MMC_CAP_NONREMOVABLE) &&
+		   (mmc->caps2 & MMC_CAP2_NO_SDIO)) {
+		dev_info(host->dev, "Z1 diagnostic: eMMC Host Software Queue disabled\n");
 	} else if (mmc->caps2 & MMC_CAP2_NO_SDIO) {
 		/* Use HSQ on eMMC/SD (but not on SDIO) if HW CQE not supported */
 		struct mmc_hsq *hsq = devm_kzalloc(&pdev->dev, sizeof(*hsq), GFP_KERNEL);
