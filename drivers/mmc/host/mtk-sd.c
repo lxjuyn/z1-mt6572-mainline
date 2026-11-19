@@ -1392,7 +1392,6 @@ static void msdc_request_done(struct msdc_host *host, struct mmc_request *mrq)
 {
 	struct mmc_host *mmc = mmc_from_priv(host);
 	unsigned long flags;
-	bool hsq_req_done;
 
 	/*
 	 * No need check the return value of cancel_delayed_work, as only ONE
@@ -1401,35 +1400,23 @@ static void msdc_request_done(struct msdc_host *host, struct mmc_request *mrq)
 	cancel_delayed_work(&host->req_timeout);
 
 	/*
-	 * If the request was handled from Host Software Queue, there's almost
-	 * nothing to do here, and we also don't need to reset mrq as any race
-	 * condition would not have any room to happen, since HSQ stores the
-	 * "scheduled" mrqs in an internal array of mrq slots anyway.
-	 * However, if the controller experienced an error, we still want to
-	 * reset it as soon as possible.
-	 *
-	 * Note that non-HSQ requests will still be happening at times, even
-	 * though it is enabled, and that's what is going to reset host->mrq.
-	 * Also, msdc_unprepare_data() is going to be called by HSQ when needed
-	 * as HSQ request finalization will eventually call the .post_req()
-	 * callback of this driver which, in turn, unprepares the data.
+	 * HSQ finalization can synchronously start the next request, which
+	 * clears host->error. Recover the controller before handing it back.
 	 */
-	hsq_req_done = host->hsq_en ? mmc_hsq_finalize_request(mmc, mrq) : false;
-	if (hsq_req_done) {
-		if (host->error)
-			msdc_recover_hw(host);
+	msdc_track_cmd_data(host, mrq->cmd);
+	if (host->error)
+		msdc_recover_hw(host);
+
+	/* HSQ unprepares data via the driver's post_req() callback. */
+	if (host->hsq_en && mmc_hsq_finalize_request(mmc, mrq))
 		return;
-	}
 
 	spin_lock_irqsave(&host->lock, flags);
 	host->mrq = NULL;
 	spin_unlock_irqrestore(&host->lock, flags);
 
-	msdc_track_cmd_data(host, mrq->cmd);
 	if (mrq->data)
 		msdc_unprepare_data(host, mrq->data);
-	if (host->error)
-		msdc_recover_hw(host);
 	mmc_request_done(mmc, mrq);
 	if (host->dev_comp->recheck_sdio_irq)
 		msdc_recheck_sdio_irq(host);
