@@ -77,6 +77,9 @@ struct mt6323_led {
 	struct mt6323_leds	*parent;
 	struct led_classdev	cdev;
 	enum led_brightness	current_brightness;
+	enum led_brightness	blank_saved_brightness;
+	bool			display_blank;
+	bool			is_backlight;
 };
 
 /**
@@ -365,6 +368,14 @@ static int mt6323_led_set_brightness(struct led_classdev *cdev,
 
 	mutex_lock(&leds->lock);
 
+	if (led->display_blank) {
+		if (brightness)
+			led->blank_saved_brightness = brightness;
+		led->current_brightness = brightness;
+		ret = 0;
+		goto out;
+	}
+
 	if (!led->current_brightness && brightness) {
 		ret = mt6323_led_hw_on(cdev, brightness);
 		if (ret < 0)
@@ -385,6 +396,67 @@ out:
 
 	return ret;
 }
+
+static ssize_t display_blank_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	struct led_classdev *cdev = dev_get_drvdata(dev);
+	struct mt6323_led *led = container_of(cdev, struct mt6323_led, cdev);
+
+	return sysfs_emit(buf, "%u\n", led->display_blank);
+}
+
+static ssize_t display_blank_store(struct device *dev,
+				   struct device_attribute *attr,
+				   const char *buf, size_t count)
+{
+	struct led_classdev *cdev = dev_get_drvdata(dev);
+	struct mt6323_led *led = container_of(cdev, struct mt6323_led, cdev);
+	struct mt6323_leds *leds = led->parent;
+	bool blank;
+	int ret = 0;
+
+	if (!led->is_backlight)
+		return -ENODEV;
+	if (kstrtobool(buf, &blank))
+		return -EINVAL;
+
+	mutex_lock(&leds->lock);
+	if (blank == led->display_blank)
+		goto out;
+
+	if (blank) {
+		if (led->current_brightness)
+			led->blank_saved_brightness = led->current_brightness;
+		ret = mt6323_led_hw_off(cdev);
+		if (ret)
+			goto out;
+		led->display_blank = true;
+		led->current_brightness = LED_OFF;
+	} else {
+		led->display_blank = false;
+		if (led->blank_saved_brightness) {
+			ret = mt6323_led_hw_on(cdev, led->blank_saved_brightness);
+			if (ret) {
+				led->display_blank = true;
+				goto out;
+			}
+			led->current_brightness = led->blank_saved_brightness;
+		}
+	}
+out:
+	mutex_unlock(&leds->lock);
+	return ret ? ret : count;
+}
+
+static DEVICE_ATTR_RW(display_blank);
+
+static struct attribute *mt6323_led_attrs[] = {
+	&dev_attr_display_blank.attr,
+	NULL,
+};
+
+ATTRIBUTE_GROUPS(mt6323_led);
 
 static int mtk_wled_hw_on(struct led_classdev *cdev)
 {
@@ -566,6 +638,7 @@ static int mt6323_led_probe(struct platform_device *pdev)
 
 	for_each_available_child_of_node_scoped(np, child) {
 		struct led_init_data init_data = {};
+		const char *label;
 		bool is_wled;
 
 		ret = of_property_read_u32(child, "reg", &reg);
@@ -589,6 +662,11 @@ static int mt6323_led_probe(struct platform_device *pdev)
 		leds->led[reg] = led;
 		leds->led[reg]->id = reg;
 		leds->led[reg]->cdev.max_brightness = spec->max_brightness;
+		if (!of_property_read_string(child, "label", &label) &&
+		    !strcmp(label, "lcd-backlight")) {
+			leds->led[reg]->is_backlight = true;
+			leds->led[reg]->cdev.groups = mt6323_led_groups;
+		}
 
 		if (is_wled) {
 			leds->led[reg]->cdev.brightness_set_blocking =
