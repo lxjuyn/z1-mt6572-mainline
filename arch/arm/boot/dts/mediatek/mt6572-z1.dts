@@ -298,7 +298,7 @@
 	 */
 	audsys: audio@11140000 {
 		compatible = "mediatek,mt6572-audio";
-		reg = <0x11140000 0x600>;
+		reg = <0x11140000 0x10000>;
 		clocks = <&topckgen CLK_TOP_AUDIO>,
 			 <&topckgen CLK_TOP_AUDIO_INTBUS_SEL>;
 		clock-names = "audio", "audio_intbus_sel";
