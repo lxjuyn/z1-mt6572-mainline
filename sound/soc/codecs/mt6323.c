@@ -129,7 +129,8 @@ static const struct reg_sequence mt6323_codec_init[] = {
 	{ AUDTOP_CON(1),   0x0140 },
 	{ AUDTOP_CON(2),   0x00c0 },
 	{ AUDTOP_CON(3),   0x0200 },
-	{ AUDTOP_CON(5),   0x0014 },
+	{ AUDTOP_CON(5),   0x1114 },	/* factory DAC bias; bit12 must stay set */
+	{ AUDTOP_CON(6),   0x37a2 },	/* factory headphone depop pre-stage */
 	{ AUDTOP_CON(6),   0x37e2 },
 	{ AUDTOP_CON(8),   0x0200 },
 	{ AUDTOP_CON(9),   0x0008 },
@@ -204,7 +205,8 @@ static int mt6323_dac_event(struct snd_soc_dapm_widget *w,
 		mutex_lock(&priv->newif_lock);
 		priv->dl_pwr = true;
 		mutex_unlock(&priv->newif_lock);
-		regmap_write(priv->regmap, AUDTOP_CON(5), 0x0014);	/* DAC output level: stock plays here; old 0x7714 over-drove the speaker */
+		/* Keep the factory DAC bias bit while the output path is active. */
+		regmap_write(priv->regmap, AUDTOP_CON(5), 0x1114);
 		/* scoped to the DAC's own bits: the UL mic path shares CON0 */
 		regmap_update_bits(priv->regmap, AUDTOP_CON(0), 0x7010, 0x7010);
 		break;
@@ -213,7 +215,8 @@ static int mt6323_dac_event(struct snd_soc_dapm_widget *w,
 		priv->dl_pwr = false;
 		mutex_unlock(&priv->newif_lock);
 		regmap_update_bits(priv->regmap, AUDTOP_CON(0), 0x7010, 0x6010);
-		regmap_write(priv->regmap, AUDTOP_CON(5), 0x0014);	/* baseline */
+		/* Preserve the factory DAC bias bit across stream teardown. */
+		regmap_write(priv->regmap, AUDTOP_CON(5), 0x1114);
 		break;
 	}
 	return 0;
