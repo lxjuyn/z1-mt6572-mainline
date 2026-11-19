@@ -11,6 +11,8 @@
  * Modelled on the mt8183-mt6358 PMIC-codec card.
  */
 
+#include <linux/delay.h>
+#include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -22,8 +24,31 @@
 #include <sound/jack.h>
 #include <sound/soc.h>
 
+/* The factory Z1 switches the external speaker path through GPIO140.
+ * Keep it off until the codec route is powered, and mute it before teardown.
+ */
+static int mt6572_speaker_event(struct snd_soc_dapm_widget *w,
+				struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
+	struct mtk_soc_card_data *data = snd_soc_card_get_drvdata(card);
+	struct gpio_desc *amp = data->mach_priv;
+
+	if (!amp)
+		return 0;
+
+	if (event == SND_SOC_DAPM_POST_PMU) {
+		gpiod_set_value_cansleep(amp, 1);
+		msleep(10);
+	} else if (event == SND_SOC_DAPM_PRE_PMD) {
+		gpiod_set_value_cansleep(amp, 0);
+	}
+
+	return 0;
+}
+
 static const struct snd_soc_dapm_widget mt6572_mt6323_widgets[] = {
-	SND_SOC_DAPM_SPK("Speaker", NULL),
+	SND_SOC_DAPM_SPK("Speaker", mt6572_speaker_event),
 	SND_SOC_DAPM_SPK("Earpiece", NULL),
 };
 
@@ -113,10 +138,16 @@ static int mt6572_mt6323_soc_card_probe(struct mtk_soc_card_data *soc_card_data,
 {
 	struct snd_soc_card *card = soc_card_data->card_data->card;
 	struct device_node *codec_np;
+	struct gpio_desc *amp;
 	struct snd_soc_dai_link *dai_link;
 	int i;
 
 	(void)legacy;
+
+	amp = devm_gpiod_get_optional(card->dev, "speaker-enable", GPIOD_OUT_LOW);
+	if (IS_ERR(amp))
+		return dev_err_probe(card->dev, PTR_ERR(amp), "cannot get speaker enable GPIO\n");
+	soc_card_data->mach_priv = amp;
 
 	/*
 	 * Bind the codec by of_node, not by component name.  An MFD child's
