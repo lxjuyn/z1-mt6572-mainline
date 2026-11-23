@@ -60,6 +60,14 @@ static const struct snd_soc_dapm_route mt6572_mt6323_routes[] = {
 	{ "Earpiece", NULL, "Earpiece Driver" },
 };
 
+/* The Z1 external amplifier takes the HP signal via the speaker route
+ * switch. Its endpoint and the headphone jack remain independently gated.
+ */
+static const struct snd_soc_dapm_route z1_routes[] = {
+	{ "Speaker", NULL, "Speaker Route" },
+	{ "Earpiece", NULL, "Earpiece Driver" },
+};
+
 /*
  * Lets userspace keep the speaker on with the headphones in; each jack event
  * re-applies the automatic route. The codec provides the Headphone switch.
@@ -148,6 +156,12 @@ static int mt6572_mt6323_soc_card_probe(struct mtk_soc_card_data *soc_card_data,
 	if (IS_ERR(amp))
 		return dev_err_probe(card->dev, PTR_ERR(amp), "cannot get speaker enable GPIO\n");
 	soc_card_data->mach_priv = amp;
+	if (of_machine_is_compatible("jbo,z1")) {
+		if (!amp)
+			return dev_err_probe(card->dev, -EINVAL, "missing Z1 speaker enable GPIO\n");
+		card->dapm_routes = z1_routes;
+		card->num_dapm_routes = ARRAY_SIZE(z1_routes);
+	}
 
 	/*
 	 * Bind the codec by of_node, not by component name.  An MFD child's

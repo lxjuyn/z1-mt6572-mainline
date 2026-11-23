@@ -13,6 +13,7 @@
 #include <linux/mfd/mt6397/core.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 
@@ -232,6 +233,42 @@ static int mt6323_hp_event(struct snd_soc_dapm_widget *w,
 {
 	struct mt6323_codec_priv *priv =
 		snd_soc_component_get_drvdata(snd_soc_dapm_to_component(w->dapm));
+	int ret;
+
+	/* Z1 feeds the external speaker amplifier from the HP output too.
+	 * The factory HAL enables the output driver, waits for its reference
+	 * to settle, then releases depop and applies the active gain.
+	 */
+	if (of_machine_is_compatible("jbo,z1")) {
+		static const struct reg_sequence release_depop[] = {
+			{ AUDTOP_CON(6), 0xf5ba },
+			{ AUDTOP_CON(5), 0x2214 },
+		};
+		static const struct reg_sequence disable[] = {
+			{ AUDTOP_CON(5), 0x0014 },
+			{ AUDTOP_CON(6), 0xf7f2 },
+			{ AUDTOP_CON(4), 0x0000 },
+			{ AUDTOP_CON(6), 0x37e2 },
+		};
+
+		if (event == SND_SOC_DAPM_POST_PMD)
+			return regmap_multi_reg_write(priv->regmap, disable, ARRAY_SIZE(disable));
+		ret = regmap_write(priv->regmap, AUDTOP_CON(6), 0xf7f2);
+		if (!ret)
+			ret = regmap_update_bits(priv->regmap, AUDTOP_CON(0), 0xf000, 0x7000);
+		if (!ret)
+			ret = regmap_write(priv->regmap, AUDTOP_CON(5), 0x0014);
+		if (!ret)
+			ret = regmap_write(priv->regmap, AUDTOP_CON(4), 0x007c);
+		if (!ret) {
+			fsleep(10000);
+			ret = regmap_multi_reg_write(priv->regmap, release_depop,
+						     ARRAY_SIZE(release_depop));
+		}
+		if (ret)
+			regmap_multi_reg_write(priv->regmap, disable, ARRAY_SIZE(disable));
+		return ret;
+	}
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
@@ -558,7 +595,6 @@ static const struct snd_soc_dapm_route mt6323_dapm_routes[] = {
 	{ "HP Driver", NULL, "DAC" },
 	{ "Headphone", NULL, "HP Driver" },
 
-	{ "Speaker Route", "Switch", "DAC" },
 	{ "Speaker Driver", NULL, "Speaker Route" },
 
 	{ "Earpiece Route", "Switch", "DAC" },
@@ -624,6 +660,13 @@ static int mt6323_component_probe(struct snd_soc_component *component)
 {
 	struct mt6323_codec_priv *priv = snd_soc_component_get_drvdata(component);
 
+	static const struct snd_soc_dapm_route speaker_sources[] = {
+		{ "Speaker Route", "Switch", "DAC" },
+		{ "Speaker Route", "Switch", "HP Driver" },
+	};
+	const struct snd_soc_dapm_route *route = of_machine_is_compatible("jbo,z1") ?
+		&speaker_sources[1] : &speaker_sources[0];
+
 	/*
 	 * SOC_* mixer controls reach the PMIC through the component regmap. Without
 	 * this the control writes go to a soft cache only -- reads look right but
@@ -632,7 +675,7 @@ static int mt6323_component_probe(struct snd_soc_component *component)
 	 * priv->regmap directly, so they were unaffected.
 	 */
 	snd_soc_component_init_regmap(component, priv->regmap);
-	return 0;
+	return snd_soc_dapm_add_routes(snd_soc_component_to_dapm(component), route, 1);
 }
 
 /* Stock GetDLFrequency / GetDLNewIFFrequency use different rate codes. */
