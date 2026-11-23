@@ -105,6 +105,8 @@ struct mt6323_codec_priv {
 	unsigned int mic_mux;		/* "MIC Input Mux": 0 = MIC1, 1 = MIC2 */
 	unsigned int mic_rate;		/* capture sample rate, from .hw_params */
 	bool mic_pwr;			/* MIC UL analog currently powered */
+	bool z1_hp_active;
+	bool z1_speaker_gain;
 	bool dl_pwr;			/* downlink DAC currently powered */
 };
 
@@ -251,8 +253,10 @@ static int mt6323_hp_event(struct snd_soc_dapm_widget *w,
 			{ AUDTOP_CON(6), 0x37e2 },
 		};
 
-		if (event == SND_SOC_DAPM_POST_PMD)
+		if (event == SND_SOC_DAPM_POST_PMD) {
+			priv->z1_hp_active = false;
 			return regmap_multi_reg_write(priv->regmap, disable, ARRAY_SIZE(disable));
+		}
 		ret = regmap_write(priv->regmap, AUDTOP_CON(6), 0xf7f2);
 		if (!ret)
 			ret = regmap_update_bits(priv->regmap, AUDTOP_CON(0), 0xf000, 0x7000);
@@ -265,6 +269,9 @@ static int mt6323_hp_event(struct snd_soc_dapm_widget *w,
 			ret = regmap_multi_reg_write(priv->regmap, release_depop,
 						     ARRAY_SIZE(release_depop));
 		}
+		if (!ret && priv->z1_speaker_gain)
+			ret = regmap_update_bits(priv->regmap, AUDTOP_CON(5), 0x7700, 0x5500);
+		priv->z1_hp_active = !ret;
 		if (ret)
 			regmap_multi_reg_write(priv->regmap, disable, ARRAY_SIZE(disable));
 		return ret;
@@ -656,6 +663,43 @@ static const struct snd_kcontrol_new mt6323_snd_controls[] = {
 		     mt6323_mic_mux_get, mt6323_mic_mux_put),
 };
 
+/* The external amp and wired headset share this PGA. The board HAL selects
+ * the factory external-amp setting only on exclusive speaker playback.
+ * DAPM takes this same mutex around the depop and power-down sequences.
+ */
+static int z1_gain_get(struct snd_kcontrol *ctl, struct snd_ctl_elem_value *val)
+{
+	struct snd_soc_component *comp = snd_kcontrol_chip(ctl);
+	struct mt6323_codec_priv *priv = snd_soc_component_get_drvdata(comp);
+
+	val->value.integer.value[0] = READ_ONCE(priv->z1_speaker_gain);
+	return 0;
+}
+
+static int z1_gain_put(struct snd_kcontrol *ctl, struct snd_ctl_elem_value *val)
+{
+	struct snd_soc_component *comp = snd_kcontrol_chip(ctl);
+	struct mt6323_codec_priv *priv = snd_soc_component_get_drvdata(comp);
+	bool enable = !!val->value.integer.value[0];
+	int ret = 0;
+
+	snd_soc_dapm_mutex_lock(comp->card);
+	if (priv->z1_speaker_gain != enable) {
+		if (priv->z1_hp_active)
+			ret = regmap_update_bits(priv->regmap, AUDTOP_CON(5),
+						 0x7700, enable ? 0x5500 : 0x2200);
+		if (!ret) {
+			WRITE_ONCE(priv->z1_speaker_gain, enable);
+			ret = 1;
+		}
+	}
+	snd_soc_dapm_mutex_unlock(comp->card);
+	return ret;
+}
+
+static const struct snd_kcontrol_new z1_gain_control =
+	SOC_SINGLE_BOOL_EXT("Z1 Speaker Gain Switch", 0, z1_gain_get, z1_gain_put);
+
 static int mt6323_component_probe(struct snd_soc_component *component)
 {
 	struct mt6323_codec_priv *priv = snd_soc_component_get_drvdata(component);
@@ -675,6 +719,12 @@ static int mt6323_component_probe(struct snd_soc_component *component)
 	 * priv->regmap directly, so they were unaffected.
 	 */
 	snd_soc_component_init_regmap(component, priv->regmap);
+	if (of_machine_is_compatible("jbo,z1")) {
+		int ret = snd_soc_add_component_controls(component, &z1_gain_control, 1);
+
+		if (ret)
+			return ret;
+	}
 	return snd_soc_dapm_add_routes(snd_soc_component_to_dapm(component), route, 1);
 }
 
