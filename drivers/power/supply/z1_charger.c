@@ -27,7 +27,7 @@
  *   - CHRSTATUS (0x0142) is NOT the charger-detect register.  Its bit 4 is
  *     PCHR_CHRDET (precharger module view), bit 3 VBAT_OV, bit 5
  *     RO_BATON_UNDET, bits 1/2 power/home-key debounce (upmu_common.c
- *     CHRSTATUS block).  It is dumped at probe for forensics only.
+ *     CHRSTATUS block).  It is dumped at probe and USB removal.
  *   - VCDT (AUXADC channel 4 -> internal register AUXADC_ADC2) is the
  *     charger-input voltage tap; the mainline mt6323-auxadc driver exposes
  *     it as the iio channel with scale 1800 mV / 2^15 (mt6323-auxadc.c,
@@ -222,20 +222,20 @@ static int z1_charger_read_online(struct z1_charger *chg, bool *online)
 	return 0;
 }
 
-static void z1_charger_update(struct z1_charger *chg)
+static bool z1_charger_update(struct z1_charger *chg)
 {
 	bool online;
 	int ret;
 
 	if (chg->stopping)
-		return;
+		return false;
 
 	ret = z1_charger_read_online(chg, &online);
 	if (ret) {
 		dev_err(chg->dev, "RGS_CHRDET read failed: %d\n", ret);
 		if (chg->disable_pending)
 			z1_charger_disable(chg);
-		return;
+		return false;
 	}
 
 	/* Charge policy + watchdog heartbeat ride on the same tick as the
@@ -247,7 +247,34 @@ static void z1_charger_update(struct z1_charger *chg)
 			 online ? "plugged" : "unplugged", online);
 		chg->online = online;
 		power_supply_changed(chg->psy);
+		return !online;
 	}
+
+	return false;
+}
+
+/* Capture one sample after the unplug edge and charger handling. The
+ * AUXADC conversion may sleep, so callers release the charger lock first.
+ */
+static void z1_charger_log_unplug(struct z1_charger *chg)
+{
+	union power_supply_propval voltage = {};
+	struct power_supply *battery;
+	unsigned int status = 0;
+	int status_ret, voltage_ret = -ENODEV;
+
+	status_ret = regmap_read(chg->regmap, MT6323_CHRSTATUS, &status);
+	battery = power_supply_get_by_name(Z1_BATTERY_PSY_NAME);
+	if (battery) {
+		voltage_ret = power_supply_get_property(battery,
+						       POWER_SUPPLY_PROP_VOLTAGE_NOW,
+						       &voltage);
+		power_supply_put(battery);
+	}
+
+	dev_info(chg->dev,
+		 "USB removal snapshot: CHRSTATUS=0x%04x (ret=%d), BATSNS=%d uV (ret=%d)\n",
+		 status, status_ret, voltage.intval, voltage_ret);
 }
 
 static int z1_charger_read_vcdt_mv(struct z1_charger *chg, int *mv)
@@ -677,10 +704,13 @@ static void z1_charger_poll_work(struct work_struct *work)
 {
 	struct z1_charger *chg = container_of(to_delayed_work(work),
 					      struct z1_charger, poll_work);
+	bool unplugged;
 
 	mutex_lock(&chg->lock);
-	z1_charger_update(chg);
+	unplugged = z1_charger_update(chg);
 	mutex_unlock(&chg->lock);
+	if (unplugged)
+		z1_charger_log_unplug(chg);
 	schedule_delayed_work(&chg->poll_work,
 			      msecs_to_jiffies(Z1_CHARGER_POLL_MS));
 }
@@ -688,10 +718,13 @@ static void z1_charger_poll_work(struct work_struct *work)
 static irqreturn_t z1_charger_irq_thread(int irq, void *data)
 {
 	struct z1_charger *chg = data;
+	bool unplugged;
 
 	mutex_lock(&chg->lock);
-	z1_charger_update(chg);
+	unplugged = z1_charger_update(chg);
 	mutex_unlock(&chg->lock);
+	if (unplugged)
+		z1_charger_log_unplug(chg);
 
 	return IRQ_HANDLED;
 }
