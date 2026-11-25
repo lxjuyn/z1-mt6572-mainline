@@ -259,8 +259,24 @@ static int mt6323_auxadc_init(struct mt6323_auxadc *auxadc)
 				  FIELD_PREP(AUXADC_CON9_OSR_MASK, AUXADC_DEFAULT_OSR));
 }
 
+static int mt6323_auxadc_fwnode_xlate(struct iio_dev *indio_dev,
+				     const struct fwnode_reference_args *iiospec)
+{
+	unsigned int i;
+
+	if (iiospec->nargs != 1)
+		return -EINVAL;
+
+	for (i = 0; i < indio_dev->num_channels; i++)
+		if (indio_dev->channels[i].channel == iiospec->args[0])
+			return i;
+
+	return -EINVAL;
+}
+
 static const struct iio_info mt6323_auxadc_iio_info = {
 	.read_raw = mt6323_auxadc_read_raw,
+	.fwnode_xlate = mt6323_auxadc_fwnode_xlate,
 };
 
 static int mt6323_auxadc_probe(struct platform_device *pdev)
