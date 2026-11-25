@@ -877,8 +877,19 @@
  * regulator_get_optional(cpu_dev, "proc")，缺 proc-supply 就 -ENODEV 不 probe
  * —— 这就是"没有 cpufreq"的真正原因（板上日志:
  * KernelCpuSpeedReader: Failed to read .../cpufreq/stats/time_in_state）。
- * OPP 表里所有频点都是 1.15 V（mt6572.dtsi 的 cpu_opp_table），所以开 DVFS 不改电压，风险低。
+ * Z1 的原厂 MT6572W DVFS 表（3.4.67 内核，0xc095f54c）在
+ * 1209 MHz 和 1300 MHz 使用 1.25 V，598/806/1001 MHz 使用 1.15 V。
  */
+&cpu_opp_table {
+	opp-1209000000 {
+		opp-microvolt = <1250000>;
+	};
+
+	opp-1300000000 {
+		opp-microvolt = <1250000>;
+	};
+};
+
 &cpu0 {
 	proc-supply = <&mt6323_vproc_reg>;
 };
