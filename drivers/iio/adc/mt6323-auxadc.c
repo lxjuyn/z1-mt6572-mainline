@@ -78,6 +78,14 @@ static const struct iio_chan_spec mt6323_auxadc_channels[] = {
 	MTK_PMIC_IIO_CHAN(isense,    MT6323_AUXADC_ISENSE,    MT6323_AUXADC_ADC1,  IIO_VOLTAGE),
 	MTK_PMIC_IIO_CHAN(batsns,    MT6323_AUXADC_BATSNS,    MT6323_AUXADC_ADC0,  IIO_VOLTAGE),
 	MTK_PMIC_IIO_CHAN(accdet,    MT6323_AUXADC_ACCDET,    MT6323_AUXADC_ADC7,  IIO_VOLTAGE),
+	{
+		.type = IIO_VOLTAGE,
+		.indexed = 1,
+		.channel = MT6323_AUXADC_BOOT_OCV,
+		.address = MT6323_AUXADC_ADC8,
+		.datasheet_name = "boot_ocv",
+		.info_mask_separate = BIT(IIO_CHAN_INFO_PROCESSED),
+	},
 };
 
 /**
@@ -162,6 +170,15 @@ static int mt6323_auxadc_read_raw(struct iio_dev *indio_dev,
 	int ret, mult;
 
 	switch (mask) {
+	case IIO_CHAN_INFO_PROCESSED:
+		if (chan->channel != MT6323_AUXADC_BOOT_OCV)
+			return -EINVAL;
+		/* Stock Z1 reads the latched PCHR wakeup sample without a new ADC request. */
+		ret = regmap_read(auxadc->regmap, chan->address, val);
+		if (ret)
+			return ret;
+		*val = (FIELD_GET(AUXADC_DATA_MASK, *val) * 7200 >> 15) + 8;
+		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
 		if (chan->channel == MT6323_AUXADC_ISENSE ||
 		    chan->channel == MT6323_AUXADC_BATSNS)
