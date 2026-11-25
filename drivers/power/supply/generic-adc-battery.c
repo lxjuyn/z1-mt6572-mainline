@@ -22,6 +22,7 @@
 #include <linux/devm-helpers.h>
 
 #include "z1_battery_profile.h"
+#include "z1_battery_ui.h"
 
 #define JITTER_DEFAULT 10 /* hope 10ms is enough */
 #define Z1_OAM_START_SAMPLES	5
@@ -64,6 +65,7 @@ struct gab {
 	struct iio_channel *boot_ocv;
 	struct delayed_work oam_work;
 	struct z1_oam_state oam;
+	struct z1_battery_ui ui;
 	u64 oam_sample_s;
 };
 
@@ -176,7 +178,7 @@ static int gab_z1_sample_vbat(struct gab *adc_bat, int count, int *mv)
 	return 0;
 }
 
-static int gab_z1_oam_start(struct gab *adc_bat)
+static int gab_z1_oam_start(struct gab *adc_bat, int *vbat_mv, int *online)
 {
 	const struct z1_oam_profile *profile = &z1_oam_stock_profile;
 	const char *source = "boot-ocv";
@@ -222,6 +224,8 @@ static int gab_z1_oam_start(struct gab *adc_bat)
 	dev_info(&adc_bat->psy->dev,
 		 "Z1 OAM seeded from %s at %d mV (BATSNS %d mV, supplied %d), estimate %d%%\n",
 		 source, initial_mv, batsns_mv, supplied, 100 - adc_bat->oam.d5);
+	*vbat_mv = batsns_mv;
+	*online = supplied;
 	return 0;
 }
 
@@ -231,21 +235,24 @@ static void gab_z1_oam_work(struct work_struct *work)
 					  oam_work);
 	u64 now = ktime_get_boottime_seconds();
 	u64 elapsed = now - adc_bat->oam_sample_s;
-	int capacity, ret, mv;
+	int capacity, ret, mv, supplied;
 
 	adc_bat->oam_sample_s = now;
 	if (!adc_bat->oam.initialized) {
-		ret = gab_z1_oam_start(adc_bat);
+		ret = gab_z1_oam_start(adc_bat, &mv, &supplied);
 	} else {
 		ret = gab_z1_sample_vbat(adc_bat, Z1_OAM_RUN_SAMPLES, &mv);
 		if (!ret && elapsed <= Z1_OAM_MAX_ELAPSED_S)
 			z1_oam_update(&adc_bat->oam, &z1_oam_stock_profile, mv, elapsed);
+		if (!ret)
+			supplied = power_supply_am_i_supplied(adc_bat->psy);
 	}
 
 	if (ret) {
 		dev_dbg(&adc_bat->psy->dev, "Z1 OAM sample unavailable: %d\n", ret);
 	} else {
-		capacity = 100 - adc_bat->oam.d5;
+		capacity = z1_battery_ui_update(&adc_bat->ui, 100 - adc_bat->oam.d5,
+					       mv, supplied > 0);
 		if (capacity != READ_ONCE(adc_bat->last_capacity)) {
 			WRITE_ONCE(adc_bat->last_capacity, capacity);
 			power_supply_changed(adc_bat->psy);
