@@ -12,6 +12,10 @@
 
 #define NR_BANKS 16
 
+/* The Z1 LK passes one u32 boot mode after the MediaTek tag header. */
+#define ATAG_MTK_BOOT 0x41000802
+#define ATAG_MTK_BOOT_WORDS 3
+
 static int node_offset(void *fdt, const char *node_path)
 {
 	int offset = fdt_path_offset(fdt, node_path);
@@ -201,6 +205,15 @@ int atags_to_fdt(void *atag_list, void *fdt, int total_space)
 					initrd_start);
 			setprop_cell(fdt, "/chosen", "linux,initrd-end",
 					initrd_start + initrd_size);
+		} else if (atag->hdr.tag == ATAG_MTK_BOOT &&
+			   atag->hdr.size == ATAG_MTK_BOOT_WORDS &&
+			   fdt_node_check_compatible(fdt, 0, "jbo,z1") == 0) {
+			const u32 *bootmode = (const u32 *)&atag->u;
+
+			ret = setprop_cell(fdt, "/chosen", "mediatek,boot-mode",
+					   *bootmode);
+			if (ret < 0)
+				return ret;
 		} else if (atag->hdr.tag == ATAG_SERIAL) {
 			char serno[16+2];
 			hex_str(serno, atag->u.serialnr.high);
