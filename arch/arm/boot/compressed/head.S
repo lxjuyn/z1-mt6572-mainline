@@ -222,16 +222,16 @@ start:
 		__EFI_HEADER
 1:
  ARM_BE8(	setend	be		)	@ go BE8 if compiled for BE8
-#ifdef DEBUG
-		mov	r0, #'!'
-		bl	putc
-#endif
  AR_CLASS(	mrs	r9, cpsr	)
 #ifdef CONFIG_ARM_VIRT_EXT
 		bl	__hyp_stub_install	@ get into SVC mode, reversibly
 #endif
 		mov	r7, r1			@ save architecture ID
 		mov	r8, r2			@ save atags pointer
+#ifdef DEBUG
+		mov	r0, #'!'
+		bl	putc			@ clobbers r0-r3, including entry r2
+#endif
 
 #ifndef CONFIG_CPU_V7M
 		/*

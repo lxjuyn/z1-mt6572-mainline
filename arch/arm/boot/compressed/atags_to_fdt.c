@@ -137,6 +137,7 @@ int atags_to_fdt(void *atag_list, void *fdt, int total_space)
 	/* In the case of 64 bits memory size, need to reserve 2 cells for
 	 * address and size for each bank */
 	__be32 mem_reg_property[2 * 2 * NR_BANKS];
+	bool z1;
 	int memcount = 0;
 	int ret, memsize;
 
@@ -159,7 +160,25 @@ int atags_to_fdt(void *atag_list, void *fdt, int total_space)
 	if (ret < 0)
 		return ret;
 
+	z1 = fdt_node_check_compatible(fdt, 0, "jbo,z1") == 0;
 	for_each_tag(atag, atag_list) {
+		/*
+		 * The Z1 appended DTB owns bootargs, memory reservations and
+		 * initrd bounds. Import just the board's boot mode from LK.
+		 */
+		if (z1) {
+			if (atag->hdr.tag == ATAG_MTK_BOOT &&
+			    atag->hdr.size == ATAG_MTK_BOOT_WORDS) {
+				const u32 *bootmode = (const u32 *)&atag->u;
+
+				ret = setprop_cell(fdt, "/chosen", "mediatek,boot-mode",
+						   *bootmode);
+				if (ret < 0)
+					return ret;
+			}
+			continue;
+		}
+
 		if (atag->hdr.tag == ATAG_CMDLINE) {
 			/* Append the ATAGS command line to the device tree
 			 * command line.
@@ -205,15 +224,6 @@ int atags_to_fdt(void *atag_list, void *fdt, int total_space)
 					initrd_start);
 			setprop_cell(fdt, "/chosen", "linux,initrd-end",
 					initrd_start + initrd_size);
-		} else if (atag->hdr.tag == ATAG_MTK_BOOT &&
-			   atag->hdr.size == ATAG_MTK_BOOT_WORDS &&
-			   fdt_node_check_compatible(fdt, 0, "jbo,z1") == 0) {
-			const u32 *bootmode = (const u32 *)&atag->u;
-
-			ret = setprop_cell(fdt, "/chosen", "mediatek,boot-mode",
-					   *bootmode);
-			if (ret < 0)
-				return ret;
 		} else if (atag->hdr.tag == ATAG_SERIAL) {
 			char serno[16+2];
 			hex_str(serno, atag->u.serialnr.high);
