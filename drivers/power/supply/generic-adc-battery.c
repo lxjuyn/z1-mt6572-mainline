@@ -17,10 +17,16 @@
 #include <linux/slab.h>
 #include <linux/iio/consumer.h>
 #include <linux/iio/types.h>
+#include <linux/ktime.h>
 #include <linux/of.h>
 #include <linux/devm-helpers.h>
 
+#include "z1_battery_profile.h"
+
 #define JITTER_DEFAULT 10 /* hope 10ms is enough */
+#define Z1_OAM_START_SAMPLES	5
+#define Z1_OAM_RUN_SAMPLES	15
+#define Z1_OAM_CHARGER_OFFSET_MV	200
 
 enum gab_chan_type {
 	GAB_VOLTAGE = 0,
@@ -54,6 +60,11 @@ struct gab {
 	int cap_n;
 	int last_capacity;	/* -1 unknown */
 	bool has_capacity;
+	bool use_oam;
+	struct iio_channel *boot_ocv;
+	struct delayed_work oam_work;
+	struct z1_oam_state oam;
+	u64 oam_sample_s;
 };
 
 static struct gab *to_generic_bat(struct power_supply *psy)
@@ -146,6 +157,104 @@ static int gab_capacity_lookup(struct gab *adc_bat, int voltage_uv, int *pct)
 	return 0;
 }
 
+static int gab_z1_sample_vbat(struct gab *adc_bat, int count, int *mv)
+{
+	int sum = 0;
+	int i, ret, sample;
+
+	for (i = 0; i < count; i++) {
+		ret = iio_read_channel_processed(adc_bat->channel[GAB_VOLTAGE],
+						 &sample);
+		if (ret < 0)
+			return ret;
+		if (!z1_oam_valid_mv(sample))
+			return -ERANGE;
+		sum += sample;
+	}
+
+	*mv = sum / count;
+	return 0;
+}
+
+static int gab_z1_oam_start(struct gab *adc_bat)
+{
+	const struct z1_oam_profile *profile = &z1_oam_stock_profile;
+	const char *source = "boot-ocv";
+	int batsns_mv, boot_mv, initial_mv, ocv_soc, vbat_soc;
+	int supplied, ret;
+
+	ret = gab_z1_sample_vbat(adc_bat, Z1_OAM_START_SAMPLES, &batsns_mv);
+	if (ret)
+		return ret;
+
+	supplied = power_supply_am_i_supplied(adc_bat->psy);
+	if (supplied < 0)
+		return supplied;
+
+	ret = iio_read_channel_processed(adc_bat->boot_ocv, &boot_mv);
+	if (ret < 0 || !z1_oam_valid_mv(boot_mv)) {
+		if (supplied)
+			return ret < 0 ? ret : -ERANGE;
+		initial_mv = batsns_mv;
+		source = "batsns";
+	} else {
+		initial_mv = boot_mv;
+		if (supplied) {
+			initial_mv -= Z1_OAM_CHARGER_OFFSET_MV;
+			if (!z1_oam_valid_mv(initial_mv))
+				return -ERANGE;
+
+			ocv_soc = 100 - z1_oam_by_voltage(profile, initial_mv, false);
+			vbat_soc = 100 - z1_oam_by_voltage(profile, batsns_mv, false);
+			if ((ocv_soc == 100 && vbat_soc <= 89) ||
+			    abs(ocv_soc - vbat_soc) > 30) {
+				initial_mv = batsns_mv;
+				source = "batsns";
+			} else {
+				source = "boot-ocv-corrected";
+			}
+		}
+	}
+
+	if (!z1_oam_init(&adc_bat->oam, profile, initial_mv))
+		return -EINVAL;
+
+	dev_info(&adc_bat->psy->dev,
+		 "Z1 OAM seeded from %s at %d mV (BATSNS %d mV, supplied %d), estimate %d%%\n",
+		 source, initial_mv, batsns_mv, supplied, 100 - adc_bat->oam.d5);
+	return 0;
+}
+
+static void gab_z1_oam_work(struct work_struct *work)
+{
+	struct gab *adc_bat = container_of(to_delayed_work(work), struct gab,
+					  oam_work);
+	u64 now = ktime_get_boottime_seconds();
+	u64 elapsed = now - adc_bat->oam_sample_s;
+	int capacity, ret, mv;
+
+	adc_bat->oam_sample_s = now;
+	if (!adc_bat->oam.initialized) {
+		ret = gab_z1_oam_start(adc_bat);
+	} else {
+		ret = gab_z1_sample_vbat(adc_bat, Z1_OAM_RUN_SAMPLES, &mv);
+		if (!ret && elapsed <= Z1_OAM_MAX_ELAPSED_S)
+			z1_oam_update(&adc_bat->oam, &z1_oam_stock_profile, mv, elapsed);
+	}
+
+	if (ret) {
+		dev_dbg(&adc_bat->psy->dev, "Z1 OAM sample unavailable: %d\n", ret);
+	} else {
+		capacity = 100 - adc_bat->oam.d5;
+		if (capacity != READ_ONCE(adc_bat->last_capacity)) {
+			WRITE_ONCE(adc_bat->last_capacity, capacity);
+			power_supply_changed(adc_bat->psy);
+		}
+	}
+
+	schedule_delayed_work(&adc_bat->oam_work, Z1_OAM_SWEEP_SECONDS * HZ);
+}
+
 static int gab_get_property(struct power_supply *psy,
 		enum power_supply_property psp, union power_supply_propval *val)
 {
@@ -184,6 +293,14 @@ static int gab_get_property(struct power_supply *psy,
 		return 0;
 	case POWER_SUPPLY_PROP_CAPACITY: {
 		int voltage_uv, pct;
+
+		if (adc_bat->use_oam) {
+			pct = READ_ONCE(adc_bat->last_capacity);
+			if (pct < 0)
+				return -ENODATA;
+			val->intval = pct;
+			return 0;
+		}
 
 		if (!adc_bat->has_capacity)
 			return -ENODATA;
@@ -312,12 +429,24 @@ static int gab_probe(struct platform_device *pdev)
 	if (!any)
 		return dev_err_probe(&pdev->dev, -ENODEV, "Failed to get any ADC channel\n");
 
-	/*
-	 * Z1 extension: optional voltage-capacity-table from DT.
-	 * Pairs of (microvolts, percent), voltage descending, e.g.
-	 *   voltage-capacity-table = <4200000 100 4000000 80 ... 3300000 0>;
-	 */
-	{
+	adc_bat->use_oam = of_device_is_compatible(pdev->dev.of_node,
+						  "jbo,z1-adc-battery");
+	if (adc_bat->use_oam) {
+		if (!adc_bat->channel[GAB_VOLTAGE])
+			return dev_err_probe(&pdev->dev, -ENODEV,
+					     "Z1 OAM requires a voltage channel\n");
+		adc_bat->boot_ocv = devm_iio_channel_get(&pdev->dev, "boot-ocv");
+		if (IS_ERR(adc_bat->boot_ocv))
+			return dev_err_probe(&pdev->dev, PTR_ERR(adc_bat->boot_ocv),
+					     "Failed to get Z1 boot-OCV channel\n");
+		adc_bat->last_capacity = -1;
+		properties[index++] = POWER_SUPPLY_PROP_CAPACITY;
+	} else {
+		/*
+		 * Z1 extension: optional voltage-capacity-table from DT.
+		 * Pairs of (microvolts, percent), voltage descending, e.g.
+		 *   voltage-capacity-table = <4200000 100 4000000 80 ... 3300000 0>;
+		 */
 		struct device_node *np = pdev->dev.of_node;
 		int n = of_property_count_u32_elems(np, "voltage-capacity-table");
 
@@ -374,6 +503,14 @@ static int gab_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "Failed to register delayed work\n");
 
+	if (adc_bat->use_oam) {
+		ret = devm_delayed_work_autocancel(&pdev->dev, &adc_bat->oam_work,
+						 gab_z1_oam_work);
+		if (ret)
+			return dev_err_probe(&pdev->dev, ret,
+					     "Failed to register Z1 OAM delayed work\n");
+	}
+
 	adc_bat->charge_finished = devm_gpiod_get_optional(&pdev->dev, "charged", GPIOD_IN);
 	if (adc_bat->charge_finished) {
 		int irq;
@@ -391,6 +528,8 @@ static int gab_probe(struct platform_device *pdev)
 	/* Schedule timer to check current status */
 	schedule_delayed_work(&adc_bat->bat_work,
 			msecs_to_jiffies(0));
+	if (adc_bat->use_oam)
+		schedule_delayed_work(&adc_bat->oam_work, 0);
 	return 0;
 }
 
@@ -399,6 +538,8 @@ static int __maybe_unused gab_suspend(struct device *dev)
 	struct gab *adc_bat = dev_get_drvdata(dev);
 
 	cancel_delayed_work_sync(&adc_bat->bat_work);
+	if (adc_bat->use_oam)
+		cancel_delayed_work_sync(&adc_bat->oam_work);
 	adc_bat->status = POWER_SUPPLY_STATUS_UNKNOWN;
 	return 0;
 }
@@ -410,6 +551,10 @@ static int __maybe_unused gab_resume(struct device *dev)
 	/* Schedule timer to check current status */
 	schedule_delayed_work(&adc_bat->bat_work,
 			      msecs_to_jiffies(JITTER_DEFAULT));
+	if (adc_bat->use_oam) {
+		adc_bat->oam_sample_s = ktime_get_boottime_seconds();
+		schedule_delayed_work(&adc_bat->oam_work, Z1_OAM_SWEEP_SECONDS * HZ);
+	}
 
 	return 0;
 }
@@ -417,6 +562,7 @@ static int __maybe_unused gab_resume(struct device *dev)
 static SIMPLE_DEV_PM_OPS(gab_pm_ops, gab_suspend, gab_resume);
 
 static const struct of_device_id gab_match[] = {
+	{ .compatible = "jbo,z1-adc-battery" },
 	{ .compatible = "adc-battery" },
 	{ }
 };
