@@ -244,7 +244,10 @@ static int mtk_wdt_restart(struct watchdog_device *wdt_dev,
 			   unsigned long action, void *data)
 {
 	struct mtk_wdt_dev *mtk_wdt = watchdog_get_drvdata(wdt_dev);
+	const char *command = data;
 	void __iomem *wdt_base;
+	struct device_node *chosen;
+	u32 boot_mode;
 	u32 reg;
 
 	wdt_base = mtk_wdt->wdt_base;
@@ -252,6 +255,16 @@ static int mtk_wdt_restart(struct watchdog_device *wdt_dev,
 	/* Enable reset in order to issue a system reset instead of an IRQ */
 	reg = readl(wdt_base + WDT_MODE);
 	reg &= ~WDT_MODE_IRQ_EN;
+	if (command && !strcmp(command, "z1-charger-normal") &&
+	    of_machine_is_compatible("jbo,z1")) {
+		chosen = of_find_node_by_path("/chosen");
+		if (!of_property_read_u32(chosen, "mediatek,boot-mode", &boot_mode) &&
+		    (boot_mode == 8 || boot_mode == 9)) {
+			/* The Z1 preloader reads bit 4 as bypass-power-key on SW reset. */
+			reg |= WDT_MODE_AUTO_START | WDT_MODE_EXRST_EN;
+		}
+		of_node_put(chosen);
+	}
 	writel(reg | WDT_MODE_KEY, wdt_base + WDT_MODE);
 
 	while (1) {
