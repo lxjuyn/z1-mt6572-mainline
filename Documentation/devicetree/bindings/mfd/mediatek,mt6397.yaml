@@ -75,8 +75,32 @@ properties:
 
       start-year: true
 
+      mediatek,rtc-fg-nvmem:
+        type: boolean
+        description:
+          Expose the battery state of charge retained by MT6323 firmware in
+          RTC_AL_HOU bits 15 through 8 as one NVMEM byte at offset 0. The
+          byte stores a percentage from 0 to 100. Enable this only on boards
+          whose firmware uses this field for battery state of charge.
+
+      nvmem-layout:
+        $ref: /schemas/nvmem/layouts/fixed-layout.yaml#
+
     required:
       - compatible
+
+    if:
+      required:
+        - mediatek,rtc-fg-nvmem
+    then:
+      properties:
+        compatible:
+          const: mediatek,mt6323-rtc
+      required:
+        - nvmem-layout
+    else:
+      properties:
+        nvmem-layout: false
 
   regulators:
     type: object

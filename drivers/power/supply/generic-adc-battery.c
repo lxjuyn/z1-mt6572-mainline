@@ -14,6 +14,7 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/nvmem-consumer.h>
 #include <linux/slab.h>
 #include <linux/iio/consumer.h>
 #include <linux/iio/types.h>
@@ -22,6 +23,7 @@
 #include <linux/devm-helpers.h>
 
 #include "z1_battery_profile.h"
+#include "z1_battery_seed.h"
 #include "z1_battery_ui.h"
 
 #define JITTER_DEFAULT 10 /* hope 10ms is enough */
@@ -63,6 +65,8 @@ struct gab {
 	bool has_capacity;
 	bool use_oam;
 	struct iio_channel *boot_ocv;
+	struct nvmem_cell *rtc_fg;
+	int rtc_soc;
 	struct delayed_work oam_work;
 	struct z1_oam_state oam;
 	struct z1_battery_ui ui;
@@ -178,11 +182,46 @@ static int gab_z1_sample_vbat(struct gab *adc_bat, int count, int *mv)
 	return 0;
 }
 
+static int gab_z1_read_rtc_soc(struct gab *adc_bat)
+{
+	u8 *data;
+	size_t length;
+	int soc;
+
+	if (!adc_bat->rtc_fg)
+		return -ENODATA;
+
+	data = nvmem_cell_read(adc_bat->rtc_fg, &length);
+	if (IS_ERR(data))
+		return PTR_ERR(data);
+	soc = length == 1 && *data <= 100 ? *data : -EINVAL;
+	kfree(data);
+	return soc;
+}
+
+static void gab_z1_save_rtc_soc(struct gab *adc_bat, int capacity)
+{
+	u8 soc = max(capacity, 1);
+	int ret;
+
+	if (!adc_bat->rtc_fg || soc == adc_bat->rtc_soc)
+		return;
+
+	ret = nvmem_cell_write(adc_bat->rtc_fg, &soc, sizeof(soc));
+	if (ret != sizeof(soc)) {
+		dev_warn_ratelimited(&adc_bat->psy->dev,
+				     "Z1 RTC battery state write failed: %d\n", ret);
+		return;
+	}
+	adc_bat->rtc_soc = soc;
+}
+
 static int gab_z1_oam_start(struct gab *adc_bat, int *vbat_mv, int *online)
 {
 	const struct z1_oam_profile *profile = &z1_oam_stock_profile;
 	const char *source = "boot-ocv";
-	int batsns_mv, boot_mv, initial_mv, ocv_soc, vbat_soc;
+	int batsns_mv, boot_mv = 0, initial_mv, ocv_soc, vbat_soc, seed_soc;
+	int rtc_soc;
 	int supplied, ret;
 
 	ret = gab_z1_sample_vbat(adc_bat, Z1_OAM_START_SAMPLES, &batsns_mv);
@@ -218,12 +257,20 @@ static int gab_z1_oam_start(struct gab *adc_bat, int *vbat_mv, int *online)
 		}
 	}
 
-	if (!z1_oam_init(&adc_bat->oam, profile, initial_mv))
+	ocv_soc = 100 - z1_oam_by_voltage(profile, initial_mv, false);
+	rtc_soc = gab_z1_read_rtc_soc(adc_bat);
+	if (rtc_soc < 0 && rtc_soc != -ENODATA)
+		dev_warn_ratelimited(&adc_bat->psy->dev,
+				     "Z1 RTC battery state unavailable: %d\n", rtc_soc);
+	adc_bat->rtc_soc = rtc_soc;
+	seed_soc = z1_battery_seed_soc(ocv_soc, rtc_soc, batsns_mv, supplied > 0);
+	if (!z1_oam_init_soc(&adc_bat->oam, profile, initial_mv, seed_soc))
 		return -EINVAL;
 
 	dev_info(&adc_bat->psy->dev,
-		 "Z1 OAM seeded from %s at %d mV (BATSNS %d mV, supplied %d), estimate %d%%\n",
-		 source, initial_mv, batsns_mv, supplied, 100 - adc_bat->oam.d5);
+		 "Z1 OAM seed %d%%: %s %d mV -> %d%%, BATSNS %d mV, boot-OCV %d mV, supplied %d, RTC %d\n",
+		 seed_soc, source, initial_mv, ocv_soc, batsns_mv, boot_mv,
+		 supplied, rtc_soc);
 	*vbat_mv = batsns_mv;
 	*online = supplied;
 	return 0;
@@ -235,10 +282,11 @@ static void gab_z1_oam_work(struct work_struct *work)
 					  oam_work);
 	u64 now = ktime_get_boottime_seconds();
 	u64 elapsed = now - adc_bat->oam_sample_s;
+	bool initialized = adc_bat->oam.initialized;
 	int capacity, ret, mv, supplied;
 
 	adc_bat->oam_sample_s = now;
-	if (!adc_bat->oam.initialized) {
+	if (!initialized) {
 		ret = gab_z1_oam_start(adc_bat, &mv, &supplied);
 	} else {
 		ret = gab_z1_sample_vbat(adc_bat, Z1_OAM_RUN_SAMPLES, &mv);
@@ -253,6 +301,9 @@ static void gab_z1_oam_work(struct work_struct *work)
 	} else {
 		capacity = z1_battery_ui_update(&adc_bat->ui, 100 - adc_bat->oam.d5,
 					       mv, supplied > 0);
+		/* Keep the retained estimate until a fresh follow-up sweep. */
+		if (initialized)
+			gab_z1_save_rtc_soc(adc_bat, capacity);
 		if (capacity != READ_ONCE(adc_bat->last_capacity)) {
 			WRITE_ONCE(adc_bat->last_capacity, capacity);
 			power_supply_changed(adc_bat->psy);
@@ -446,6 +497,13 @@ static int gab_probe(struct platform_device *pdev)
 		if (IS_ERR(adc_bat->boot_ocv))
 			return dev_err_probe(&pdev->dev, PTR_ERR(adc_bat->boot_ocv),
 					     "Failed to get Z1 boot-OCV channel\n");
+		if (of_property_match_string(pdev->dev.of_node, "nvmem-cell-names",
+					     "rtc-fg") >= 0) {
+			adc_bat->rtc_fg = devm_nvmem_cell_get(&pdev->dev, "rtc-fg");
+			if (IS_ERR(adc_bat->rtc_fg))
+				return dev_err_probe(&pdev->dev, PTR_ERR(adc_bat->rtc_fg),
+						     "Failed to get Z1 RTC battery cell\n");
+		}
 		adc_bat->last_capacity = -1;
 		properties[index++] = POWER_SUPPLY_PROP_CAPACITY;
 	} else {

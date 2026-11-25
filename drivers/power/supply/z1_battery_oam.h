@@ -117,21 +117,40 @@ static inline int z1_oam_ocv_from_dod(const struct z1_oam_profile *profile,
 	return p[i].mv;
 }
 
-static inline bool z1_oam_init(struct z1_oam_state *state,
-			       const struct z1_oam_profile *profile, int ocv_mv)
+static inline bool z1_oam_init_with_dod(struct z1_oam_state *state,
+					const struct z1_oam_profile *profile,
+					int ocv_mv, int dod)
 {
 	struct z1_oam_state next = {};
 
-	if (!z1_oam_valid_mv(ocv_mv) || !z1_oam_valid_profile(profile))
-		return false;
-
-	next.d0 = z1_oam_by_voltage(profile, ocv_mv, false);
+	next.d0 = dod;
 	next.d1 = next.d2 = next.d3 = next.d4 = next.d5 = next.d0;
 	next.ocv1_mv = next.ocv2_mv = z1_oam_ocv_from_dod(profile, next.d0);
 	next.r1_mohms = next.r2_mohms = z1_oam_by_voltage(profile, ocv_mv, true);
 	next.initialized = true;
 	*state = next;
 	return true;
+}
+
+static inline bool z1_oam_init_soc(struct z1_oam_state *state,
+				   const struct z1_oam_profile *profile,
+				   int ocv_mv, int soc)
+{
+	if (soc < 0 || soc > 100 || !z1_oam_valid_mv(ocv_mv) ||
+	    !z1_oam_valid_profile(profile))
+		return false;
+
+	return z1_oam_init_with_dod(state, profile, ocv_mv, 100 - soc);
+}
+
+static inline bool z1_oam_init(struct z1_oam_state *state,
+			       const struct z1_oam_profile *profile, int ocv_mv)
+{
+	if (!z1_oam_valid_mv(ocv_mv) || !z1_oam_valid_profile(profile))
+		return false;
+
+	return z1_oam_init_with_dod(state, profile, ocv_mv,
+				    z1_oam_by_voltage(profile, ocv_mv, false));
 }
 
 static inline int z1_oam_accumulate(int car, int current_deci_ma, unsigned int elapsed_s)

@@ -4,17 +4,23 @@
 * Author: Tianping.Fang <tianping.fang@mediatek.com>
 */
 
+#include <linux/bitfield.h>
 #include <linux/err.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/mt6397/core.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/nvmem-provider.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/rtc.h>
 #include <linux/mfd/mt6397/rtc.h>
 #include <linux/mod_devicetable.h>
+
+#define MT6323_RTC_AL_HOU	0x001c
+#define MT6323_RTC_FG_MASK	GENMASK(15, 8)
+#define MT6323_RTC_FG_MAX	100
 
 static int mtk_rtc_write_trigger(struct mt6397_rtc *rtc)
 {
@@ -34,6 +40,72 @@ static int mtk_rtc_write_trigger(struct mt6397_rtc *rtc)
 		dev_err(rtc->rtc_dev->dev.parent,
 			"failed to write WRTGR: %d\n", ret);
 
+	return ret;
+}
+
+static int mt6323_rtc_fg_read(void *priv, unsigned int offset, void *val,
+			      size_t bytes)
+{
+	struct mt6397_rtc *rtc = priv;
+	unsigned int data, soc;
+	int ret;
+
+	if (offset || bytes != 1)
+		return -EINVAL;
+
+	mutex_lock(&rtc->lock);
+	ret = regmap_read(rtc->regmap, rtc->addr_base + MT6323_RTC_AL_HOU,
+			  &data);
+	mutex_unlock(&rtc->lock);
+	if (ret)
+		return ret;
+
+	soc = FIELD_GET(MT6323_RTC_FG_MASK, data);
+	if (soc > MT6323_RTC_FG_MAX)
+		return -ENODATA;
+
+	*(u8 *)val = soc;
+	return 0;
+}
+
+static int mt6323_rtc_fg_write(void *priv, unsigned int offset, void *val,
+			       size_t bytes)
+{
+	struct mt6397_rtc *rtc = priv;
+	unsigned int reg = rtc->addr_base + MT6323_RTC_AL_HOU;
+	unsigned int data, expected, readback;
+	u8 soc;
+	int ret;
+
+	if (offset || bytes != 1)
+		return -EINVAL;
+
+	soc = *(u8 *)val;
+	if (soc > MT6323_RTC_FG_MAX)
+		return -EINVAL;
+
+	mutex_lock(&rtc->lock);
+	ret = regmap_read(rtc->regmap, reg, &data);
+	if (ret)
+		goto out_unlock;
+
+	/* Preserve the alarm hour and all other bits in the low byte. */
+	expected = (data & ~MT6323_RTC_FG_MASK) |
+		   FIELD_PREP(MT6323_RTC_FG_MASK, soc);
+	ret = regmap_write(rtc->regmap, reg, expected);
+	if (ret)
+		goto out_unlock;
+
+	ret = mtk_rtc_write_trigger(rtc);
+	if (ret)
+		goto out_unlock;
+
+	ret = regmap_read(rtc->regmap, reg, &readback);
+	if (!ret && readback != expected)
+		ret = -EIO;
+
+out_unlock:
+	mutex_unlock(&rtc->lock);
 	return ret;
 }
 
@@ -241,6 +313,16 @@ static const struct rtc_class_ops mtk_rtc_ops = {
 
 static int mtk_rtc_probe(struct platform_device *pdev)
 {
+	struct nvmem_config fg_config = {
+		.name = "mt6323-rtc-fg",
+		.id = NVMEM_DEVID_AUTO,
+		.size = 1,
+		.word_size = 1,
+		.stride = 1,
+		.root_only = true,
+		.reg_read = mt6323_rtc_fg_read,
+		.reg_write = mt6323_rtc_fg_write,
+	};
 	struct resource *res;
 	struct mt6397_chip *mt6397_chip = dev_get_drvdata(pdev->dev.parent);
 	struct mt6397_rtc *rtc;
@@ -289,7 +371,17 @@ static int mtk_rtc_probe(struct platform_device *pdev)
 	rtc->rtc_dev->start_secs = mktime64(1968, 1, 2, 0, 0, 0);
 	rtc->rtc_dev->set_start_time = true;
 
-	return devm_rtc_register_device(rtc->rtc_dev);
+	ret = devm_rtc_register_device(rtc->rtc_dev);
+	if (ret)
+		return ret;
+
+	if (of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6323-rtc") &&
+	    of_property_read_bool(pdev->dev.of_node, "mediatek,rtc-fg-nvmem")) {
+		fg_config.priv = rtc;
+		return devm_rtc_nvmem_register(rtc->rtc_dev, &fg_config);
+	}
+
+	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP

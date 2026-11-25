@@ -369,6 +369,8 @@
 		io-channels = <&mt6323_adc MT6323_AUXADC_BATSNS>,
 			      <&mt6323_adc MT6323_AUXADC_BAT_TEMP>;
 		io-channel-names = "voltage", "temperature";
+		nvmem-cells = <&z1_rtc_fg>;
+		nvmem-cell-names = "rtc-fg";
 		monitored-battery = <&battery_data>;
 		/* The charger registers cfg.fwnode so supply lookup can match it. */
 		power-supplies = <&z1_charger>;
@@ -896,4 +898,18 @@
 
 &cpu1 {
 	proc-supply = <&mt6323_vproc_reg>;
+};
+
+&{/soc/pwrap@1000f000/mt6323/rtc} {
+	mediatek,rtc-fg-nvmem;
+
+	nvmem-layout {
+		compatible = "fixed-layout";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		z1_rtc_fg: battery-soc@0 {
+			reg = <0 1>;
+		};
+	};
 };
